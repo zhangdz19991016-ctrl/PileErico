@@ -1,0 +1,62 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <DuckovPath Condition=" '$(DuckovPath)' == '' ">D:\SteamLibrary\steamapps\common\Escape from Duckov</DuckovPath>
+    
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Nullable>enable</Nullable>
+    
+    <ImplicitUsings>disable</ImplicitUsings>
+    
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <ResolveAssemblyWarnOrErrorOnTargetArchitectureMismatch>None</ResolveAssemblyWarnOrErrorOnTargetArchitectureMismatch>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="$(DuckovPath)\Duckov_Data\Managed\FMODUnity.dll">
+      <Private>false</Private>
+    </Reference>
+    <PackageReference Include="Lib.Harmony" Version="2.4.1">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+    <Reference Include="Sirenix.OdinInspector.Attributes">
+       <HintPath>$(DuckovPath)\Duckov_Data\Managed\Sirenix.OdinInspector.Attributes.dll</HintPath>
+       <Private>false</Private>
+    </Reference>
+    
+    <Reference Include="$(DuckovPath)\Duckov_Data\Managed\TeamSoda.*.dll">
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="$(DuckovPath)\Duckov_Data\Managed\ItemStatsSystem.dll">
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="$(DuckovPath)\Duckov_Data\Managed\UniTask.dll">
+       <Private>false</Private>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+       <HintPath>$(DuckovPath)\Duckov_Data\Managed\Newtonsoft.Json.dll</HintPath>
+       <Private>false</Private>
+    </Reference>
+    
+    <Reference Include="$(DuckovPath)\Duckov_Data\Managed\Unity*.dll">
+       <Private>false</Private>
+    </Reference>
+    <Reference Include="SodaLocalization">
+      <HintPath>$(DuckovPath)\Duckov_Data\Managed\SodaLocalization.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="NodeCanvas">
+      <HintPath>$(DuckovPath)\Duckov_Data\Managed\NodeCanvas.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="ParadoxNotion">
+       <HintPath>$(DuckovPath)\Duckov_Data\Managed\ParadoxNotion.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    
+  </ItemGroup>
+  
+</Project>

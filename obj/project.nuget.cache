@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "dgSpecHash": "kFgQzwMOKJMYbx7uSysvk9WN7vy1qb0u0MKiK6NFc1gXJOe6BkO/rbFQNLgkP2/uv2a1CVXD/xbwZ7dw8uv7jg==",
+  "success": true,
+  "projectFilePath": "C:\\Users\\zhang\\Desktop\\PileErico\\PileErico\\PileErico.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\zhang\\.nuget\\packages\\lib.harmony\\2.4.1\\lib.harmony.2.4.1.nupkg.sha512",
+    "C:\\Users\\zhang\\.nuget\\packages\\lib.harmony.ref\\2.4.1\\lib.harmony.ref.2.4.1.nupkg.sha512",
+    "C:\\Users\\zhang\\.nuget\\packages\\system.reflection.emit\\4.7.0\\system.reflection.emit.4.7.0.nupkg.sha512"
+  ],
+  "logs": []
+}

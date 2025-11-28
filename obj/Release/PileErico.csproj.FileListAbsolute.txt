@@ -1,0 +1,8 @@
+C:\Users\zhang\Desktop\PileErico\PileErico\bin\Release\PileErico.deps.json
+C:\Users\zhang\Desktop\PileErico\PileErico\bin\Release\PileErico.dll
+C:\Users\zhang\Desktop\PileErico\PileErico\bin\Release\PileErico.pdb
+C:\Users\zhang\Desktop\PileErico\PileErico\obj\Release\PileErico.csproj.AssemblyReference.cache
+C:\Users\zhang\Desktop\PileErico\PileErico\obj\Release\PileErico.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\zhang\Desktop\PileErico\PileErico\obj\Release\PileErico.csproj.CoreCompileInputs.cache
+C:\Users\zhang\Desktop\PileErico\PileErico\obj\Release\PileErico.dll
+C:\Users\zhang\Desktop\PileErico\PileErico\obj\Release\PileErico.pdb
