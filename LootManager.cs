@@ -8,393 +8,260 @@ using ItemStatsSystem.Items;
 using Newtonsoft.Json;
 using UnityEngine;
 using Duckov; 
-using Duckov.Scenes; // [v21] 包含 LevelManager
-using Duckov.Utilities; // [v21] 包含 InteractableLootbox (基于 v19 的修复)
-using UnityEngine.Events;
+using Duckov.Scenes;
+using Duckov.Utilities;
 
 namespace PileErico 
 {
     public class LootManager
     {
-        // 战利品功能
-        private LootConfig? lootConfig; 
-        private bool configLoaded;
-        
-        // [v21] 恢复 v13 的订阅字典 (用于扫描)
-        private Dictionary<CharacterMainControl, UnityAction<DamageInfo>> subscribedHandlers = new Dictionary<CharacterMainControl, UnityAction<DamageInfo>>();
-        
-        // 引用主模组
         private readonly ModBehaviour modBehaviour;
         private readonly string configDir;
-        
-        // [v21] 两个功能都需要
-        private readonly BossHealthHUDManager? bossHudManager;
-        private Coroutine? checkEnemiesCoroutine;
+        private LootConfig? lootConfig; 
+        private bool configLoaded;
 
-
-        // [v21] 构造函数需要 hudManager
-        public LootManager(ModBehaviour modBehaviour, string configDir, BossHealthHUDManager? hudManager)
+        public LootManager(ModBehaviour modBehaviour, string configDir)
         {
             this.modBehaviour = modBehaviour;
             this.configDir = configDir;
-            this.bossHudManager = hudManager;
         }
 
-        // [v21] 恢复 v13 的初始化
         public void Initialize()
         {
-            ModBehaviour.LogToFile("[LootManager] 正在初始化 (v21 等待战利品箱)...");
+            ModBehaviour.LogToFile("[LootManager] 正在初始化...");
+            
+            // 1. 加载配置
             this.LoadLootConfig(this.configDir);
             
-            if (this.checkEnemiesCoroutine != null)
+            // 2. 订阅全局扫描事件
+            ScanManager.OnCharacterSpawned += OnEnemyFound;
+            
+            // 3. 处理已经在场上的敌人
+            foreach (var character in ScanManager.ActiveCharacters)
             {
-                this.modBehaviour.StopCoroutine(this.checkEnemiesCoroutine);
+                OnEnemyFound(character);
             }
-            this.checkEnemiesCoroutine = this.modBehaviour.StartCoroutine(this.CheckForNewEnemiesCoroutine());
         }
 
-        // [v21] 恢复 v13 的停用
         public void Deactivate()
         {
-            if (this.checkEnemiesCoroutine != null)
-            {
-                this.modBehaviour.StopCoroutine(this.checkEnemiesCoroutine);
-            }
-            
-            foreach (var pair in subscribedHandlers)
-            {
-                if (pair.Key != null && pair.Key.Health != null)
-                {
-                    pair.Key.Health.OnDeadEvent.RemoveListener(pair.Value);
-                }
-            }
-            subscribedHandlers.Clear();
-            ModBehaviour.LogToFile("[LootManager] 已停止并清理订阅。");
+            ScanManager.OnCharacterSpawned -= OnEnemyFound;
+            ModBehaviour.LogToFile("[LootManager] 已停止监听。");
         }
 
-        #region 敌人扫描与订阅 (v21 - 两个功能都需要)
-        
-        private IEnumerator CheckForNewEnemiesCoroutine()
+        // === 核心逻辑：发现敌人 -> 匹配规则 -> 挂载组件 ===
+        private void OnEnemyFound(CharacterMainControl character)
         {
-            for (;;)
-            {
-                try
-                {
-                    if (this.configLoaded && CharacterMainControl.Main != null)
-                    {
-                        var allCharacters = UnityEngine.Object.FindObjectsOfType<CharacterMainControl>();
-                        foreach (var character in allCharacters)
-                        {
-                            if (character == null || character == CharacterMainControl.Main || subscribedHandlers.ContainsKey(character))
-                            {
-                                continue;
-                            }
+            if (!this.configLoaded || this.lootConfig == null || character == null) return;
+            if (character == CharacterMainControl.Main) return; // 排除玩家
 
-                            if (character.Health != null)
+            // 1. 防止重复挂载
+            if (character.GetComponent<LootDropper>() != null) return;
+
+            // 2. 匹配规则 (支持 ID 精确匹配)
+            EnemyLootRule? matchingRule = FindMatchingRule(character);
+            
+            // 3. 挂载组件
+            if (matchingRule != null && matchingRule.LootItems != null && matchingRule.LootItems.Count > 0)
+            {
+                var dropper = character.gameObject.AddComponent<LootDropper>();
+                // 传入 this 引用，以便组件回调 TriggerLootDrop
+                dropper.Setup(this, character, matchingRule);
+                
+                // ModBehaviour.LogToFile($"[LootManager] 监控目标: {ScanManager.GetCharacterID(character)}");
+            }
+        }
+
+        // === 执行逻辑：组件监听到死亡后调用此方法 ===
+        public void TriggerLootDrop(CharacterMainControl deadCharacter, EnemyLootRule rule)
+        {
+            // 启动协程
+            modBehaviour.StartCoroutine(AddLootToSpawnedLootBoxCoroutine(deadCharacter, rule));
+        }
+
+        // === 智能匹配算法 (调用 ScanManager 数据库) ===
+        private EnemyLootRule? FindMatchingRule(CharacterMainControl character)
+        {
+            if (character == null || this.lootConfig == null) return null;
+            
+            // 获取目标的真实 ID (PresetName) 和 显示名
+            string targetID = ScanManager.GetCharacterID(character);
+            string targetName = character.name;
+
+            foreach (EnemyLootRule rule in this.lootConfig.EnemyLootRules)
+            {
+                if (rule.EnemyNameKeywords != null && rule.EnemyNameKeywords.Count > 0)
+                {
+                    foreach (string keyword in rule.EnemyNameKeywords)
+                    {
+                        if (string.IsNullOrEmpty(keyword)) continue;
+
+                        // 1. 查 ScanManager 的映射表 (精准匹配)
+                        if (ScanManager.NameIdMapping.TryGetValue(keyword, out string[] mappedIds))
+                        {
+                            // 只要目标 ID 包含映射表里的任意一个 ID (忽略大小写)
+                            if (mappedIds.Any(id => targetID.IndexOf(id, StringComparison.OrdinalIgnoreCase) >= 0))
                             {
-                                // 1. 订阅战利品掉落 (在 OnCharacterDeath 中处理)
-                                UnityAction<DamageInfo> handler = (DamageInfo dmgInfo) => OnCharacterDeath(character, dmgInfo);
-                                character.Health.OnDeadEvent.AddListener(handler);
-                                subscribedHandlers.Add(character, handler);
-                                
-                                // 2. 将敌人信息共享给 Boss HUD 管理器
-                                bossHudManager?.RegisterCharacter(character); //
+                                return rule;
                             }
+                        }
+
+                        // 2. 后备：直接模糊匹配 (兼容旧配置或英文 ID)
+                        if (targetID.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0 || 
+                            targetName.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            return rule;
                         }
                     }
                 }
-                catch (Exception ex)
-                {
-                    ModBehaviour.LogErrorToFile("[LootManager] CheckForNewEnemiesCoroutine 异常: " + ex);
-                }
-                
-                yield return new WaitForSeconds(3.0f); // 每3秒检查一次新敌人
             }
+            // 返回默认规则
+            return this.lootConfig.EnemyLootRules.FirstOrDefault(r => r.EnemyNameKeywords == null || r.EnemyNameKeywords.Count == 0);
         }
-        
-        #endregion
 
-        #region 战利品核心逻辑 (v21)
-
-        // [v21] 这是由 Health.OnDeadEvent 触发的
-        private void OnCharacterDeath(CharacterMainControl deadCharacter, DamageInfo damageInfo)
-        {
-            // [v21] (修复 CS0019) 'DamageInfo' 是 struct, 不能与 null 比较
-            if (!ModBehaviour.isActivated || !this.configLoaded || this.lootConfig == null || deadCharacter == null)
-            {
-                return;
-            }
-
-            try
-            {
-                // 1. [v21] 查找规则
-                EnemyLootRule? matchingRule = FindMatchingRule(deadCharacter); //
-                if (matchingRule?.LootItems == null)
-                {
-                    ModBehaviour.LogToFile($"[LootManager] '{SafeGetName(deadCharacter)}' 死亡，但未找到匹配的战利品规则。");
-                    return;
-                }
-                
-                ModBehaviour.LogToFile($"[LootManager] 正在为 '{SafeGetName(deadCharacter)}' 准备战利品...");
-
-                // 2. [v21] 启动新协程，等待 LootBox 生成
-                this.modBehaviour.StartCoroutine(this.AddLootToSpawnedLootBoxCoroutine(deadCharacter, matchingRule));
-            }
-            catch (Exception ex) 
-            { 
-                ModBehaviour.LogErrorToFile("[PileErico] OnCharacterDeath (v21) 出错: " + ex.Message); 
-            }
-            finally
-            {
-                // [v21] 清理订阅
-                if (deadCharacter != null && subscribedHandlers.TryGetValue(deadCharacter, out var handler))
-                {
-                    if (deadCharacter.Health != null)
-                    {
-                        deadCharacter.Health.OnDeadEvent.RemoveListener(handler);
-                    }
-                    subscribedHandlers.Remove(deadCharacter);
-                }
-            }
-        }
-        
-        // [v21 新增] 核心修复：等待战利品箱生成
+        // === 协程：等待箱子生成并注入物品 ===
         private IEnumerator AddLootToSpawnedLootBoxCoroutine(CharacterMainControl deadCharacter, EnemyLootRule matchingRule)
         {
-            // [v21] (修复 CS1061) 'DamageInfo' 没有 'DeadCharacter', 我们已经有 'deadCharacter' 了
-            
             InteractableLootbox? foundLootbox = null;
-            float timeout = 2.0f; // 等待最多2秒
-
-            ModBehaviour.LogToFile($"[LootManager] 等待 '{SafeGetName(deadCharacter)}' 的战利品箱生成...");
+            float timeout = 3.0f; // 等待 3 秒
 
             while (timeout > 0f)
             {
-                // [v21] 在死亡位置附近 2 米范围内搜索战利品箱
+                if (deadCharacter == null) yield break; 
+
+                // 搜索死亡位置附近的战利品箱 (3米内)
                 foundLootbox = UnityEngine.Object.FindObjectsOfType<InteractableLootbox>()
                     .FirstOrDefault(lootbox => 
-                        lootbox.Inventory != null && //
-                        Vector3.Distance(lootbox.transform.position, deadCharacter.transform.position) < 2.0f
-                        // 也许还需要检查它是否 "未被初始化" 或 "刚生成"
+                        lootbox.Inventory != null && 
+                        Vector3.Distance(lootbox.transform.position, deadCharacter.transform.position) < 3.0f
                     );
 
-                if (foundLootbox != null)
-                {
-                    ModBehaviour.LogToFile($"[LootManager] 已找到战利品箱: {foundLootbox.name}");
-                    break;
-                }
+                if (foundLootbox != null) break;
                 
-                yield return null; // 等待下一帧
+                yield return null; 
                 timeout -= Time.deltaTime;
             }
 
-            // [v21] 找到战利品箱后，执行 v15 的添加逻辑
             if (foundLootbox != null && foundLootbox.Inventory != null)
             {
                 try
                 {
                     if (lootConfig != null && lootConfig.ExtraSlots > 0) 
-                        foundLootbox.Inventory.SetCapacity(foundLootbox.Inventory.Capacity + lootConfig.ExtraSlots); //
+                        foundLootbox.Inventory.SetCapacity(foundLootbox.Inventory.Capacity + lootConfig.ExtraSlots);
                     
-                    foreach (LootItem lootItem in matchingRule.LootItems) //
+                    foreach (LootItem lootItem in matchingRule.LootItems)
                     {
-                        if (UnityEngine.Random.Range(0f, 100f) < lootItem.Chance) //
+                        if (UnityEngine.Random.Range(0f, 100f) <= lootItem.Chance)
                         {
-                            Item? newItem = ItemAssetsCollection.InstantiateSync(lootItem.ItemID); //
+                            Item? newItem = ItemAssetsCollection.InstantiateSync(lootItem.ItemID);
                             if (newItem != null)
                             {
-                                newItem.StackCount = lootItem.Count; //
-                                foundLootbox.Inventory.AddAndMerge(newItem, 0); //
-                                ModBehaviour.LogToFile($"[PileErico] 成功添加物品: [ID: {lootItem.ItemID}, 数量: {lootItem.Count}] 到 {foundLootbox.name}。");
-                            }
-                            else 
-                            { 
-                                ModBehaviour.LogWarningToFile($"[!!!] 物品生成失败！TypeID: {lootItem.ItemID} 未在游戏中注册或无效。"); //
+                                newItem.StackCount = lootItem.Count;
+                                foundLootbox.Inventory.AddAndMerge(newItem, 0);
+                                ModBehaviour.LogToFile($"[LootManager] 掉落注入: [ID:{lootItem.ItemID} x{lootItem.Count}] -> {foundLootbox.name}");
                             }
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    ModBehaviour.LogErrorToFile("[PileErico] AddLootToSpawnedLootBoxCoroutine 出错: " + ex.Message);
+                    ModBehaviour.LogErrorToFile("[LootManager] 注入错误: " + ex.Message);
                 }
-            }
-            else
-            {
-                ModBehaviour.LogErrorToFile($"[LootManager] 未能为 '{SafeGetName(deadCharacter)}' 找到生成的战利品箱。战利品添加失败。");
             }
         }
 
-        #endregion
-        
-        #region 配置加载 (v10 修复)
-        
+        // === 配置加载 ===
         private void LoadLootConfig(string modDir)
         {
             try
             {
                 string configPath = Path.Combine(modDir, "LootConfig.json");
-                ModBehaviour.LogToFile("[LootManager] 正在加载战利品配置: " + configPath);
-
                 if (!File.Exists(configPath))
                 {
-                    ModBehaviour.LogToFile("[LootManager] 未找到 LootConfig.json，正在创建默认配置...");
-                    this.lootConfig = this.GenerateDefaultConfig();
+                    this.lootConfig = new LootConfig(); 
                     string json = JsonConvert.SerializeObject(this.lootConfig, Formatting.Indented);
                     File.WriteAllText(configPath, json);
                 }
                 else
                 {
-                    string json = File.ReadAllText(configPath); // [v10 修复]
+                    string json = File.ReadAllText(configPath);
                     this.lootConfig = JsonConvert.DeserializeObject<LootConfig>(json); 
-                    
-                    if (this.lootConfig == null)
-                    {
-                        ModBehaviour.LogErrorToFile("[LootManager] 加载 LootConfig.json 失败! 文件内容为空或格式错误。");
-                        this.configLoaded = false;
-                        return;
-                    }
                 }
-
-                ModBehaviour.LogToFile($"[LootManager] 战利品配置加载成功。包含 {this.lootConfig.EnemyLootRules.Count} 条规则。"); //
                 this.configLoaded = true;
             }
             catch (Exception ex)
             {
-                ModBehaviour.LogErrorToFile("[LootManager] LoadLootConfig 异常: " + ex);
+                ModBehaviour.LogErrorToFile("[LootManager] 配置加载异常: " + ex);
                 this.configLoaded = false;
             }
         }
-        
-        private LootConfig GenerateDefaultConfig()
+
+        // =============================================================
+        //  组件类：LootDropper (集成在同一文件)
+        // =============================================================
+        public class LootDropper : MonoBehaviour
         {
-            return new LootConfig
+            private LootManager? _manager;
+            private CharacterMainControl? _target;
+            private EnemyLootRule? _rule;
+            private bool _isQuitting = false;
+
+            public void Setup(LootManager manager, CharacterMainControl target, EnemyLootRule rule)
             {
-                ExtraSlots = 0, //
-                EnemyLootRules = new List<EnemyLootRule> //
+                _manager = manager;
+                _target = target;
+                _rule = rule;
+
+                if (_target != null && _target.Health != null)
                 {
-                    new EnemyLootRule
-                    {
-                        EnemyNameKeywords = new List<string> { "光之男", "Man of Light", "LighMan_Prefab" }, //
-                        LootItems = new List<LootItem> //
-                        {
-                            new LootItem { ItemID = 254, Count = 1, Chance = 100 } //
-                        }
-                    },
-                    new EnemyLootRule
-                    {
-                        EnemyNameKeywords = new List<string>(), //
-                        LootItems = new List<LootItem> //
-                        {
-                            new LootItem { ItemID = 254, Count = 1, Chance = 5 } //
-                        }
-                    }
-                }
-            };
-        }
-        
-        #endregion
-
-        #region 辅助方法 (v21 修复)
-        
-        // [v21] 恢复 v1 的辅助方法
-        private string GetEnemyNameKey(CharacterMainControl character, string fallbackName)
-        {
-            // [v21 修复警告] 检查 null
-            if (character == null) return fallbackName;
-            
-            if (character.characterPreset != null && !string.IsNullOrEmpty(character.characterPreset.DisplayName))
-            {
-                return character.characterPreset.DisplayName;
-            }
-            if (character.CharacterItem != null && !string.IsNullOrEmpty(character.CharacterItem.DisplayName))
-            {
-                return character.CharacterItem.DisplayName;
-            }
-            return fallbackName;
-        }
-
-        // [v21] 恢复 v1 的 FindMatchingRule
-        private EnemyLootRule? FindMatchingRule(CharacterMainControl character)
-        {
-            // [v21 修复警告] 检查 null
-            if (character == null) return null;
-            
-            if (this.lootConfig == null || this.lootConfig.EnemyLootRules == null) //
-            {
-                return null;
-            }
-            string enemyNameKey = this.GetEnemyNameKey(character, character.name);
-            string enemyDisplayName = character.CharacterItem?.DisplayName ?? enemyNameKey;
-
-            foreach (EnemyLootRule enemyLootRule in this.lootConfig.EnemyLootRules) //
-            {
-                // [v21 修复警告] 检查 null
-                if (enemyLootRule?.EnemyNameKeywords != null && enemyLootRule.EnemyNameKeywords.Count > 0) //
-                {
-                    if (enemyLootRule.EnemyNameKeywords.Any(keyword => 
-                        !string.IsNullOrEmpty(keyword) && 
-                        (enemyNameKey.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0 || 
-                         enemyDisplayName.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0)))
-                    {
-                        return enemyLootRule;
-                    }
+                    _target.Health.OnDeadEvent.AddListener(OnDeath);
                 }
             }
-            
-            return this.lootConfig.EnemyLootRules.FirstOrDefault((EnemyLootRule r) => r.EnemyNameKeywords == null || r.EnemyNameKeywords.Count == 0); //
-        }
-        
-        // [v21] SafeGetName (来自 v10)
-        private string SafeGetName(CharacterMainControl ch)
-        {
-            if (ch == null) return string.Empty;
-            try
+
+            private void OnDeath(DamageInfo info)
             {
-                if (ch.characterPreset != null && !string.IsNullOrEmpty(ch.characterPreset.DisplayName))
+                if (_isQuitting) return;
+                if (_manager != null && _target != null && _rule != null)
                 {
-                    return ch.characterPreset.DisplayName;
+                    _manager.TriggerLootDrop(_target, _rule);
                 }
+                Cleanup();
             }
-            catch { }
-            return ch.name;
+
+            private void Cleanup()
+            {
+                if (_target != null && _target.Health != null)
+                {
+                    _target.Health.OnDeadEvent.RemoveListener(OnDeath);
+                }
+                Destroy(this);
+            }
+
+            private void OnDestroy() => Cleanup();
+            private void OnApplicationQuit() => _isQuitting = true;
         }
-
-        #endregion
-        
-    } // <-- LootManager 类结束
-
-    // [集成] 以下是来自外部 .cs 文件的定义 (无改动)
-
-    /// <summary>
-    /// 来自 LootConfig.cs
-    /// </summary>
-    [Serializable]
-    public class LootConfig //
-    {
-        public int ExtraSlots = 12; //
-        public List<EnemyLootRule> EnemyLootRules = new List<EnemyLootRule>(); //
     }
 
-    /// <summary>
-    /// 来自 EnemyLootRule.cs
-    /// </summary>
+    // === 数据结构 ===
     [Serializable]
-    public class EnemyLootRule //
+    public class LootConfig
     {
-        public List<string> EnemyNameKeywords = new List<string>(); //
-        public List<LootItem> LootItems = new List<LootItem>(); //
+        public int ExtraSlots = 12;
+        public List<EnemyLootRule> EnemyLootRules = new List<EnemyLootRule>();
     }
 
-    /// <summary>
-    /// 来自 LootItem.cs
-    /// </summary>
     [Serializable]
-    public class LootItem //
+    public class EnemyLootRule
     {
-        public int ItemID; //
-        public int Count = 1; //
-        public float Chance = 100f; //
+        public List<string> EnemyNameKeywords = new List<string>();
+        public List<LootItem> LootItems = new List<LootItem>();
     }
 
-} // <-- 命名空间 PileErico 结束
+    [Serializable]
+    public class LootItem
+    {
+        public int ItemID;
+        public int Count = 1;
+        public float Chance = 100f;
+    }
+}

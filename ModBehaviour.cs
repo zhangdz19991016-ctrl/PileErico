@@ -6,6 +6,7 @@ using System.Text;
 using UnityEngine;
 using UnityEngine.SceneManagement; 
 using ItemStatsSystem; 
+using HarmonyLib; // 确保添加 Harmony 引用
 
 namespace PileErico
 {
@@ -20,7 +21,7 @@ namespace PileErico
             public bool EnableBossHealthBar = true; 
             public bool EnableInvasion = true;
             public bool EnableSoulsLikeUI = true; 
-            public bool EnableSlotExpandedManager = true; // [新增]
+            public bool EnableSlotExpandedManager = true; 
         }
 
         public static ModuleConfig Config = new ModuleConfig();
@@ -37,7 +38,7 @@ namespace PileErico
         private InvasionManager? invasionManager;
         private ItemManager? itemManager;
         private UIManager? uiManager;
-        private SlotExpandedManager? slotExpandedManager; // [新增]
+        private SlotExpandedManager? slotExpandedManager; 
 
         // =========================================================
         // 3. Mod 生命周期
@@ -56,27 +57,33 @@ namespace PileErico
             
             LogToFile(">>> 模组开始停用...");
 
-            // 使用 SafeAction 统一处理销毁逻辑，无需重复写 try-catch
+            // 1. 停用业务模块
             SafeAction("LootManager", () => this.lootManager?.Deactivate());
             SafeAction("ShopManager", () => this.shopManager?.Deactivate());
             SafeAction("EstusFlaskManager", () => this.estusFlaskManager?.Deactivate());
             SafeAction("InvasionManager", () => this.invasionManager?.Deactivate());
-            SafeAction("BossHealthHUDManager", () => this.bossHudManager?.Deactivate());
+            SafeAction("BossHealthHUDManager", () => {
+                if (this.bossHudManager != null) Destroy(this.bossHudManager.gameObject); // 销毁 Root
+            });
             SafeAction("ItemManager", () => this.itemManager?.Deactivate());
 
-            // 特殊处理 MonoBehaviour 组件
             if (uiManager != null)
             {
                 SafeAction("UIManager", () => Destroy(uiManager));
                 uiManager = null;
             }
 
-            // [新增] 清理槽位扩展
             SafeAction("SlotExpandedManager", () => 
             {
                 slotExpandedManager?.Dispose();
                 slotExpandedManager = null;
             });
+
+            // 2. 停用核心引擎 (ScanManager)
+            SafeAction("ScanManager", () => ScanManager.Dispose());
+            
+            // 可选：如果支持热重载，这里可以 Unpatch Harmony
+            // try { var harmony = new Harmony("com.pileerico.scan"); harmony.UnpatchAll("com.pileerico.scan"); } catch { }
 
             LogToFile("<<< 模组已停用。");
         }
@@ -92,14 +99,35 @@ namespace PileErico
             LogToFile(">>> Mod (全部功能) 开始初始化...");
 
             LoadModuleConfig();
-
             string configDir = GetConfigDir();
 
             // -----------------------------------------------------
-            // 模块初始化区域 - 无论增加多少模块，都保持这种整洁的格式
+            // 0. 核心引擎初始化 (ScanManager + Harmony)
+            // -----------------------------------------------------
+            try 
+            {
+                // 确保只 Patch 一次
+                if (!Harmony.HasAnyPatches("com.pileerico.scan"))
+                {
+                    var harmony = new Harmony("com.pileerico.scan");
+                    // 扫描 PileErico 程序集中的所有 Patch (包含 CharacterScanPatches)
+                    harmony.PatchAll(Assembly.GetExecutingAssembly()); 
+                    LogToFile("[Harmony] 补丁应用成功。");
+                }
+                
+                // 初始化扫描器 (捕获场上已有的怪)
+                ScanManager.Initialize();
+            }
+            catch (Exception ex)
+            {
+                LogErrorToFile($"[致命错误] Harmony/ScanManager 初始化失败: {ex}");
+            }
+
+            // -----------------------------------------------------
+            // 模块初始化区域
             // -----------------------------------------------------
 
-            // 1. BossHUD (依赖项)
+            // 1. BossHUD (现在它订阅 ScanManager)
             SafeInit("BossHealthHUDManager", () => {
                 GameObject hudRoot = new GameObject("BossHealthHUDRoot");
                 DontDestroyOnLoad(hudRoot);
@@ -108,7 +136,8 @@ namespace PileErico
 
             // 2. 核心功能
             SafeInit("LootManager", () => {
-                this.lootManager = new LootManager(this, configDir, this.bossHudManager);
+                // 注意：构造函数不再需要 bossHudManager
+                this.lootManager = new LootManager(this, configDir);
                 this.lootManager.Initialize();
             });
 
@@ -123,6 +152,8 @@ namespace PileErico
             });
 
             SafeInit("InvasionManager", () => {
+                // InvasionManager 现在内部应该使用 ScanManager.ActiveCharacters，
+                // 但为了兼容旧代码结构，构造函数保持传递引用即可
                 this.invasionManager = new InvasionManager(this, this.bossHudManager!);
                 this.invasionManager.Initialize();
             });
@@ -132,7 +163,7 @@ namespace PileErico
                 this.itemManager.Initialize();
             });
 
-            // 3. UI 模块 (受配置控制)
+            // 3. UI 模块
             if (Config.EnableSoulsLikeUI)
             {
                 SafeInit("UIManager", () => {
@@ -141,7 +172,7 @@ namespace PileErico
             }
             else LogToFile("UIManager 已跳过 (配置禁用)");
 
-            // 4. [新增] 槽位扩展模块 (受配置控制)
+            // 4. 槽位扩展模块
             if (Config.EnableSlotExpandedManager)
             {
                 SafeInit("SlotExpandedManager", () => {
@@ -158,12 +189,9 @@ namespace PileErico
         }
 
         // =========================================================
-        // 4. 核心工具方法 (减少重复代码的关键)
+        // 4. 核心工具方法
         // =========================================================
 
-        /// <summary>
-        /// 安全执行初始化逻辑，自动处理异常和日志
-        /// </summary>
         private void SafeInit(string moduleName, Action initLogic)
         {
             try
@@ -177,9 +205,6 @@ namespace PileErico
             }
         }
 
-        /// <summary>
-        /// 安全执行清理逻辑
-        /// </summary>
         private void SafeAction(string moduleName, Action action)
         {
             try
@@ -213,7 +238,7 @@ namespace PileErico
             try
             {
                 string dllDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? string.Empty;
-                string logDir = Path.Combine(Directory.GetParent(dllDir)?.FullName ?? dllDir, "logs"); // 尝试放到上级或同级 logs 目录
+                string logDir = Path.Combine(Directory.GetParent(dllDir)?.FullName ?? dllDir, "logs");
                 if (!Directory.Exists(logDir)) Directory.CreateDirectory(logDir);
                 
                 logPath = Path.Combine(logDir, "PileErico.log");
@@ -245,8 +270,6 @@ namespace PileErico
                 {
                     string json = File.ReadAllText(configPath);
                     JsonUtility.FromJsonOverwrite(json, Config);
-                    
-                    // 回写以同步新字段
                     File.WriteAllText(configPath, JsonUtility.ToJson(Config, true));
                     LogToFile($"已加载配置文件: {configPath}");
                 }
@@ -258,8 +281,6 @@ namespace PileErico
             }
         }
 
-        #region Static Log Functions
-        
         public static void LogToFile(string message)
         {
             string logMessage = $"[INFO] {DateTime.Now:T}: {message}";
@@ -290,7 +311,5 @@ namespace PileErico
             }
             catch {}
         }
-        
-        #endregion
     }
 }
