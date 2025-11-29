@@ -2,301 +2,386 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO; 
-using System.Reflection;
-using System.Linq; 
-using Duckov.Modding;
+using System.Reflection; 
+using UnityEngine;
 using Duckov.PerkTrees;
 using Duckov.PerkTrees.Behaviours;
-using Duckov.PerkTrees.Interactable;
-using Duckov.Utilities;
-using HarmonyLib;
+using Duckov.UI;
 using ItemStatsSystem;
-using ItemStatsSystem.Stats; 
-using PileErico;
-using UnityEngine;
-using UnityEngine.UI; 
-using UnityEngine.SceneManagement; 
-using Duckov; 
-using Duckov.Economy; 
+using HarmonyLib;
 
 namespace PileErico
 {
     public class SkillTreeManager
     {
         private readonly ModBehaviour modBehaviour;
-        private readonly string configDir;
-        private static Harmony? harmony;
-        
-        public static PerkTree? CustomRollTree;
+        private Harmony? _harmony;
         
         public const string TREE_UNIQUE_ID = "PileErico_Roll_Tree_ID";
+        public const string TREE_OBJ_NAME = "PileErico_Roll_Tree"; 
+        public static PerkTree? CustomRollTree;
+        
         public const string SkillID_1 = "PileErico_Roll_1";
         public const string SkillID_2 = "PileErico_Roll_2";
         public const string SkillID_3 = "PileErico_Roll_3";
         public const int CostItemID = 2025000005;
 
-        public static SkillTreeManager? Instance { get; private set; }
-
         public SkillTreeManager(ModBehaviour modBehaviour, string configDir)
         {
             this.modBehaviour = modBehaviour;
-            this.configDir = configDir;
-            Instance = this;
         }
 
         public void Initialize()
         {
             ModBehaviour.LogToFile("[SkillTreeManager] 正在初始化...");
             
-            if (harmony == null)
+            // 1. 应用 UI 修复补丁
+            if (_harmony == null)
             {
                 try
                 {
-                    harmony = new Harmony("com.pileerico.skilltree");
-                    harmony.PatchAll(Assembly.GetExecutingAssembly());
-                    ModBehaviour.LogToFile("[SkillTreeManager] Harmony 补丁已应用。");
+                    _harmony = new Harmony("PileErico.SkillTree.UIFixes");
+                    
+                    // [修复] PatchAll 需要 Assembly 参数，而不是 Type
+                    _harmony.PatchAll(typeof(SkillTreeUIPatches).Assembly);
+                    
+                    ModBehaviour.LogToFile("[SkillTreeManager] UI 强制渲染补丁已应用。");
                 }
-                catch (Exception ex) { ModBehaviour.LogErrorToFile($"[SkillTreeManager] Harmony 补丁失败: {ex.Message}"); }
+                catch (Exception ex)
+                {
+                    ModBehaviour.LogErrorToFile($"[SkillTreeManager] 补丁失败: {ex}");
+                }
             }
 
-            CreateSkillTree();
+            // 2. 创建数据
+            CreateSkillTreeData();
         }
 
         public void Deactivate()
         {
-            if (harmony != null)
+            if (_harmony != null)
             {
-                harmony.UnpatchAll("com.pileerico.skilltree");
-                harmony = null;
+                _harmony.UnpatchAll("PileErico.SkillTree.UIFixes");
+                _harmony = null;
             }
-            
+
             if (CustomRollTree != null)
             {
-                if (PerkTreeManager.Instance != null)
+                if (PerkTreeManager.Instance != null && PerkTreeManager.Instance.perkTrees.Contains(CustomRollTree))
                 {
                     PerkTreeManager.Instance.perkTrees.Remove(CustomRollTree);
                 }
-                if (CustomRollTree.gameObject != null)
-                {
-                    GameObject.Destroy(CustomRollTree.gameObject);
-                }
+                if (CustomRollTree.gameObject != null) UnityEngine.Object.Destroy(CustomRollTree.gameObject);
                 CustomRollTree = null;
             }
-            
-            Instance = null;
         }
 
-        public void AttachToMerchant(GameObject merchantInteractableObj)
-        {
-            if (merchantInteractableObj == null) return;
-            modBehaviour.StartCoroutine(AttachRoutine(merchantInteractableObj));
-        }
-
-        private IEnumerator AttachRoutine(GameObject targetObj)
-        {
-            yield return null; 
-            InteractableBase mainInteractable = targetObj.GetComponent<InteractableBase>();
-            if (mainInteractable == null) mainInteractable = targetObj.GetComponentInChildren<InteractableBase>();
-
-            if (mainInteractable != null)
-            {
-                AttachToExistingGroup(mainInteractable);
-            }
-            else
-            {
-                ModBehaviour.LogErrorToFile($"[SkillTreeManager] 无法在 {targetObj.name} 上找到 InteractableBase。");
-            }
-        }
-
-        private void AttachToExistingGroup(InteractableBase mainInteractable)
-        {
-            try
-            {
-                GameObject parentObj = mainInteractable.gameObject;
-                ModBehaviour.LogToFile($"[SkillTreeManager] 正在挂载技能树到: {parentObj.name}");
-
-                // 1. 创建逻辑子物体
-                GameObject skillObj = new GameObject("PileErico_SkillInteract");
-                skillObj.transform.SetParent(parentObj.transform);
-                skillObj.transform.localPosition = Vector3.zero;
-                
-                // [修复幽灵点] 强制设置为 Ignore Raycast (Layer 2)
-                skillObj.layer = 2; 
-
-                // 2. 添加组件
-                PerkTreeUIInvoker skillInvoker = skillObj.AddComponent<PerkTreeUIInvoker>();
-                skillInvoker.InteractName = "学习身法"; 
-                skillInvoker.perkTreeID = TREE_UNIQUE_ID;
-                skillInvoker.MarkerActive = false; 
-                skillInvoker.enabled = true;
-
-                // [修复幽灵点] 移除可能自动生成的碰撞体
-                var colliders = skillObj.GetComponents<Collider>();
-                foreach(var c in colliders) GameObject.Destroy(c);
-                
-                // 3. 激活
-                skillObj.SetActive(false);
-                skillObj.SetActive(true);
-
-                // 二次清理
-                foreach(var c in skillObj.GetComponents<Collider>()) GameObject.Destroy(c);
-
-                // 预设 isGroup
-                var flagField = typeof(InteractableBase).GetField("isGroup", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-                if (flagField != null) flagField.SetValue(mainInteractable, true);
-
-                ModBehaviour.LogToFile("[SkillTreeManager] 挂载对象创建完成。");
-            }
-            catch (Exception ex)
-            {
-                ModBehaviour.LogErrorToFile($"[SkillTreeManager] 挂载出错: {ex.Message}");
-            }
-        }
-
-        private void CreateSkillTree()
+        private void CreateSkillTreeData()
         {
             if (CustomRollTree != null) return;
+
             try
             {
-                GameObject treeObj = new GameObject("PileErico_Roll_Tree_Obj");
-                GameObject.DontDestroyOnLoad(treeObj);
+                GameObject treeObj = new GameObject("PileErico_Roll_Tree_Data");
+                UnityEngine.Object.DontDestroyOnLoad(treeObj);
+                
                 CustomRollTree = treeObj.AddComponent<PerkTree>();
-                CustomRollTree.name = "PileErico_Roll_Tree";
+                CustomRollTree.name = TREE_OBJ_NAME; 
+                
                 SetPrivateField(CustomRollTree, "perkTreeID", TREE_UNIQUE_ID);
-                var perksField = typeof(PerkTree).GetField("perks", BindingFlags.NonPublic | BindingFlags.Instance) ?? typeof(PerkTree).GetField("m_Perks", BindingFlags.NonPublic | BindingFlags.Instance);
-                if (perksField != null) {
+                
+                var perksField = typeof(PerkTree).GetField("perks", BindingFlags.NonPublic | BindingFlags.Instance) ?? 
+                                 typeof(PerkTree).GetField("m_Perks", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (perksField != null)
+                {
                     var listType = typeof(List<>).MakeGenericType(typeof(Perk));
                     perksField.SetValue(CustomRollTree, Activator.CreateInstance(listType));
                 }
-                if (PerkTreeManager.Instance != null && !PerkTreeManager.Instance.perkTrees.Contains(CustomRollTree)) PerkTreeManager.Instance.perkTrees.Add(CustomRollTree);
 
+                if (PerkTreeManager.Instance != null && !PerkTreeManager.Instance.perkTrees.Contains(CustomRollTree)) 
+                {
+                    PerkTreeManager.Instance.perkTrees.Add(CustomRollTree);
+                }
+
+                // 创建节点 (坐标 X, Y)
                 Sprite? sharedIcon = null;
-                try {
-                    string dllPath = Assembly.GetExecutingAssembly().Location;
-                    string modDir = Path.GetDirectoryName(dllPath) ?? string.Empty;
-                    string iconPath = Path.Combine(modDir, "icons", "灵活翻滚.png");
-                    sharedIcon = LoadSprite(iconPath);
-                } catch { }
 
+                // 根节点 (0,0)
                 Perk p1 = CreatePerk(SkillID_1, "灵活翻滚", "降低25%翻滚的耐力消耗", 2, sharedIcon, new Vector2(0, 0));
                 AddToTree(CustomRollTree, p1); 
-                Perk p2 = CreatePerk(SkillID_2, "灵活翻滚II", "缩短50%的翻滚冷却时间", 4, sharedIcon, new Vector2(200, 0));
+                
+                // 子节点 (300, 0)
+                Perk p2 = CreatePerk(SkillID_2, "灵活翻滚II", "缩短50%的翻滚冷却时间", 4, sharedIcon, new Vector2(300, 0));
                 AddRequirement(p2, p1);
                 AddToTree(CustomRollTree, p2);
-                Perk p3 = CreatePerk(SkillID_3, "灵活翻滚III", "翻滚后获得20%近战伤害倍率（持续3秒）", 6, sharedIcon, new Vector2(400, 0));
+                
+                // 孙节点 (600, 0)
+                Perk p3 = CreatePerk(SkillID_3, "灵活翻滚III", "翻滚后获得20%近战伤害倍率（持续3秒）", 6, sharedIcon, new Vector2(600, 0));
                 AddRequirement(p3, p2);
                 AddToTree(CustomRollTree, p3);
+                
+                ModBehaviour.LogToFile("[SkillTreeManager] 数据注册完成。");
             }
-            catch (Exception e) { ModBehaviour.LogErrorToFile($"[SkillTreeManager] 创建技能树失败: {e.Message}"); }
+            catch (Exception e) { ModBehaviour.LogErrorToFile($"[SkillTreeManager] 数据创建失败: {e.Message}"); }
         }
 
         private Perk CreatePerk(string id, string displayName, string desc, int itemCostCount, Sprite? icon, Vector2 position)
         {
             GameObject perkObj = new GameObject(id);
-            if (CustomRollTree != null) {
+            if (CustomRollTree != null) 
+            {
                 perkObj.transform.SetParent(CustomRollTree.transform);
                 perkObj.transform.localPosition = Vector3.zero;
-                perkObj.transform.localScale = Vector3.one;
             }
+            
             RectTransform rect = perkObj.AddComponent<RectTransform>();
             rect.anchoredPosition = position;
             rect.sizeDelta = new Vector2(100, 100); 
+
             Perk p = perkObj.AddComponent<Perk>();
             p.name = id; 
-            SetPrivateField(p, "displayNameKey", displayName); 
-            SetPrivateField(p, "descriptionKey", desc);
+            
+            SetPrivateField(p, "displayName", displayName); 
+            SetPrivateField(p, "hasDescription", false); 
             SetPrivateField(p, "master", CustomRollTree);
-            if (icon != null) {
-                if (!SetPrivateField(p, "m_Icon", icon) && !SetPrivateField(p, "_icon", icon)) SetProperty(p, "Icon", icon);
-            }
-            try {
-                var listField = typeof(Perk).GetField("requiredItems", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                if (listField != null) {
-                    var listObj = listField.GetValue(p); 
-                    if (listObj == null) { listObj = Activator.CreateInstance(listField.FieldType); listField.SetValue(p, listObj); }
-                    if (listObj != null) {
-                        Type itemAmountType = listObj.GetType().GetGenericArguments()[0];
-                        object costObj = Activator.CreateInstance(itemAmountType);
-                        SetPrivateField(costObj, "itemTypeID", CostItemID);
-                        SetPrivateField(costObj, "amount", itemCostCount);
-                        listObj.GetType().GetMethod("Add").Invoke(listObj, new object[] { costObj });
-                    }
-                }
+            if (icon != null) SetPrivateField(p, "icon", icon);
+
+            // 挂载描述组件
+            var descHolder = perkObj.AddComponent<PerkDescriptionHolder>();
+            descHolder.text = desc;
+
+            try 
+            {
                 var reqField = typeof(Perk).GetField("requirement", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                if (reqField != null && reqField.GetValue(p) == null) { object reqObj = Activator.CreateInstance(reqField.FieldType); reqField.SetValue(p, reqObj); }
+                if (reqField != null)
+                {
+                    var req = Activator.CreateInstance(reqField.FieldType); 
+                    
+                    var costField = req.GetType().GetField("cost");
+                    if(costField != null)
+                    {
+                        var cost = Activator.CreateInstance(costField.FieldType);
+                        var itemsField = cost.GetType().GetField("items");
+                        if(itemsField != null)
+                        {
+                            var itemsList = Activator.CreateInstance(itemsField.FieldType);
+                            itemsField.SetValue(cost, itemsList);
+
+                            Type itemAmountType = itemsList.GetType().GetGenericArguments()[0];
+                            object itemAmount = Activator.CreateInstance(itemAmountType);
+                            
+                            SetFieldOnObject(itemAmount, "itemTypeID", CostItemID);
+                            SetFieldOnObject(itemAmount, "amount", itemCostCount);
+
+                            itemsList.GetType().GetMethod("Add").Invoke(itemsList, new object[] { itemAmount });
+                        }
+                        costField.SetValue(req, cost);
+                    }
+                    reqField.SetValue(p, req);
+                }
             } catch { }
             return p;
         }
 
-        private void AddToTree(PerkTree tree, Perk perk) { try { var listField = typeof(PerkTree).GetField("perks", BindingFlags.NonPublic | BindingFlags.Instance) ?? typeof(PerkTree).GetField("m_Perks", BindingFlags.NonPublic | BindingFlags.Instance); if (listField != null) { var list = listField.GetValue(tree); if (list == null) { list = Activator.CreateInstance(listField.FieldType); listField.SetValue(tree, list); } list.GetType().GetMethod("Add")?.Invoke(list, new object[] { perk }); } } catch { } }
-        private void AddRequirement(Perk child, Perk parent) { try { PerkRequirement req = new PerkRequirement(); SetPrivateField(req, "requiredPerk", parent); var reqListField = typeof(Perk).GetField("requirements", BindingFlags.NonPublic | BindingFlags.Instance) ?? typeof(Perk).GetField("m_Requirements", BindingFlags.NonPublic | BindingFlags.Instance); if (reqListField != null) { var list = reqListField.GetValue(child); if (list == null) { list = Activator.CreateInstance(reqListField.FieldType); reqListField.SetValue(child, list); } list.GetType().GetMethod("Add")?.Invoke(list, new object[] { req }); } } catch { } }
-        private bool SetPrivateField(object target, string fieldName, object? value) { if (target == null) return false; var field = target.GetType().GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance); if (field != null) { field.SetValue(target, value); return true; } return false; }
-        private void SetProperty(object target, string propName, object? value) { var prop = target.GetType().GetProperty(propName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance); if (prop != null && prop.CanWrite) prop.SetValue(target, value); }
-        private Sprite? LoadSprite(string filePath) { if (!File.Exists(filePath)) return null; byte[] fileData = File.ReadAllBytes(filePath); Texture2D tex = new Texture2D(2, 2); if (tex.LoadImage(fileData)) return Sprite.Create(tex, new Rect(0, 0, tex.width, tex.height), new Vector2(0.5f, 0.5f), 100f); return null; }
-    }
+        private void AddToTree(PerkTree tree, Perk perk) 
+        { 
+            try { 
+                var listField = typeof(PerkTree).GetField("perks", BindingFlags.NonPublic | BindingFlags.Instance) ?? 
+                                typeof(PerkTree).GetField("m_Perks", BindingFlags.NonPublic | BindingFlags.Instance); 
+                if (listField != null) { 
+                    var list = listField.GetValue(tree); 
+                    list.GetType().GetMethod("Add")?.Invoke(list, new object[] { perk }); 
+                } 
+            } catch { } 
+        }
 
-    [HarmonyPatch(typeof(InteractableBase))]
-    public static class InteractableGroupPatch
-    {
-        [HarmonyPatch("GetInteractableList")]
-        [HarmonyPostfix]
-        public static void FixMerchantGroupList(InteractableBase __instance, ref IList __result)
+        private void AddRequirement(Perk child, Perk parent) 
+        { 
+            try { 
+                var reqField = typeof(Perk).GetField("requirement", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (reqField != null)
+                {
+                    var req = reqField.GetValue(child);
+                    var perksListField = req.GetType().GetField("perks");
+                    if (perksListField != null)
+                    {
+                        var list = perksListField.GetValue(req);
+                        if (list == null)
+                        {
+                            var listType = typeof(List<>).MakeGenericType(typeof(Perk));
+                            list = Activator.CreateInstance(listType);
+                            perksListField.SetValue(req, list);
+                        }
+                        list.GetType().GetMethod("Add")?.Invoke(list, new object[] { parent });
+                    }
+                }
+            } catch { } 
+        }
+
+        private void SetPrivateField(object target, string fieldName, object? value) 
+        { 
+            if (target == null) return; 
+            var field = target.GetType().GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance); 
+            field?.SetValue(target, value); 
+        }
+
+        private void SetFieldOnObject(object target, string fieldName, object value)
         {
-            if (__instance.name != "PerkWeaponShop") return;
-            if (__instance.transform.root.name != "PileErico_Cloned_Merchant") return;
+            var field = target.GetType().GetField(fieldName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if(field != null) field.SetValue(target, value);
+        }
 
-            var groupListField = typeof(InteractableBase).GetField("otherInterablesInGroup", BindingFlags.NonPublic | BindingFlags.Instance);
-            if (groupListField == null) return;
-            var groupList = groupListField.GetValue(__instance) as IList;
-            if (groupList == null) return;
-
-            var skillInvoker = __instance.GetComponentInChildren<PerkTreeUIInvoker>(true);
-            if (skillInvoker == null) return;
-
-            if (skillInvoker.gameObject.layer != 2) skillInvoker.gameObject.layer = 2; 
-            
-            bool hasSelf = false;
-            bool hasSkill = false;
-            foreach (var item in groupList)
-            {
-                // [CS0252 修复] 使用显式转换 (object) 来消除引用比较的歧义警告
-                if ((object)item == (object)__instance) hasSelf = true;
-                if ((object)item == (object)skillInvoker) hasSkill = true;
-            }
-
-            if (!hasSelf)
-            {
-                if (groupList.Count > 0) groupList.Insert(0, __instance);
-                else groupList.Add(__instance);
-            }
-            if (!hasSkill)
-            {
-                groupList.Add(skillInvoker);
-            }
-
-            var flagField = typeof(InteractableBase).GetField("isGroup", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
-            if (flagField != null) flagField.SetValue(__instance, true);
+        private void SetProperty(object target, string propName, object? value) 
+        { 
+            var prop = target.GetType().GetProperty(propName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance); 
+            if (prop != null && prop.CanWrite) prop.SetValue(target, value); 
         }
     }
 
-    [HarmonyPatch(typeof(CA_Dash))] 
-    public static class RollSkillPatches
+    public class PerkDescriptionHolder : MonoBehaviour
     {
-        private static float _originalStaminaCost = -1f;
-        private static float _originalCoolTime = -1f; 
-        private static CharacterMainControl? GetCharacter(object instance) { var field = instance.GetType().GetField("characterController", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance); if (field != null) return field.GetValue(instance) as CharacterMainControl; return null; }
+        public string text = "";
+    }
 
-        [HarmonyPatch("OnStart")] [HarmonyPrefix]
-        public static void OnDashStart(CA_Dash __instance) {
-            var character = GetCharacter(__instance); if (character == null || character != CharacterMainControl.Main) return;
-            bool hasSkill1 = IsPerkUnlocked(SkillTreeManager.SkillID_1);
-            bool hasSkill2 = IsPerkUnlocked(SkillTreeManager.SkillID_2);
-            if (hasSkill1) { var costField = typeof(CA_Dash).GetField("staminaCost", BindingFlags.Public | BindingFlags.Instance); if (costField != null) { float current = (float)costField.GetValue(__instance); if (_originalStaminaCost < 0) _originalStaminaCost = current; costField.SetValue(__instance, _originalStaminaCost * 0.75f); } }
-            if (hasSkill2) { var coolField = typeof(CA_Dash).GetField("coolTime", BindingFlags.Public | BindingFlags.Instance); if (coolField != null) { float current = (float)coolField.GetValue(__instance); if (_originalCoolTime < 0) _originalCoolTime = current; coolField.SetValue(__instance, _originalCoolTime * 0.5f); } }
+    // =============================================================
+    // 关键补丁：强制劫持 UI 绘制流程
+    // =============================================================
+    public static class SkillTreeUIPatches
+    {
+        // 1. 劫持 PopulatePerks：绕过官方 Graph 检查，强制显示图标
+        [HarmonyPatch(typeof(PerkTreeView), "PopulatePerks")]
+        [HarmonyPrefix]
+        public static bool PopulatePerks_Prefix(PerkTreeView __instance)
+        {
+            // 获取 target 字段
+            var targetField = typeof(PerkTreeView).GetField("target", BindingFlags.NonPublic | BindingFlags.Instance);
+            var target = targetField?.GetValue(__instance) as PerkTree;
+
+            // 只有当打开的是我们的技能树时，才进行劫持
+            if (target != null && target.name == SkillTreeManager.TREE_OBJ_NAME)
+            {
+                // 手动执行类似官方的逻辑，但去掉 Graph 检查
+                try
+                {
+                    // 获取私有成员
+                    var contentParent = GetField<RectTransform>(__instance, "contentParent");
+                    var perkEntryPoolProp = typeof(PerkTreeView).GetProperty("PerkEntryPool", BindingFlags.NonPublic | BindingFlags.Instance);
+                    var perkEntryPool = perkEntryPoolProp?.GetValue(__instance) as Duckov.Utilities.PrefabPool<PerkEntry>;
+                    
+                    var perkLinePoolProp = typeof(PerkTreeView).GetProperty("PerkLinePool", BindingFlags.NonPublic | BindingFlags.Instance);
+                    var perkLinePool = perkLinePoolProp?.GetValue(__instance) as Duckov.Utilities.PrefabPool<Duckov.UI.PerkLineEntry>;
+
+                    if (contentParent != null && perkEntryPool != null && perkLinePool != null)
+                    {
+                        // 1. 刷新布局
+                        UnityEngine.UI.LayoutRebuilder.ForceRebuildLayoutImmediate(contentParent);
+                        perkEntryPool.ReleaseAll();
+                        perkLinePool.ReleaseAll();
+
+                        // 2. 暴力生成所有 Perk 图标
+                        // [修复] 使用公开属性 Perks，因为 perks 字段是 internal
+                        foreach (Perk perk in target.Perks)
+                        {
+                            var entry = perkEntryPool.Get(contentParent);
+                            entry.Setup(__instance, perk);
+                        }
+
+                        // 3. 调用布局计算 (反射调用 FitChildren)
+                        var fitMethod = typeof(PerkTreeView).GetMethod("FitChildren", BindingFlags.NonPublic | BindingFlags.Instance);
+                        fitMethod?.Invoke(__instance, null);
+
+                        // 4. 调用连线绘制 (反射调用 RefreshConnections - 注意：我们也需要补丁它)
+                        var refreshMethod = typeof(PerkTreeView).GetMethod("RefreshConnections", BindingFlags.NonPublic | BindingFlags.Instance);
+                        refreshMethod?.Invoke(__instance, null);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ModBehaviour.LogErrorToFile($"[SkillTreeUIPatches] 强制渲染出错: {ex}");
+                }
+
+                return false; // [关键] 阻止执行原版逻辑
+            }
+            return true; // 其他技能树照常执行
         }
-        [HarmonyPatch("OnStop")] [HarmonyPostfix]
-        public static void OnDashStop(CA_Dash __instance) { var character = GetCharacter(__instance); if (character == null || character != CharacterMainControl.Main) return; if (IsPerkUnlocked(SkillTreeManager.SkillID_3)) { character.StartCoroutine(ApplyDamageBuff(character)); } }
-        private static bool IsPerkUnlocked(string perkID) { try { var method = typeof(PerkTreeManager).GetMethod("IsPerkUnlocked", BindingFlags.Public | BindingFlags.Static, null, new Type[] { typeof(string) }, null); if (method != null) return (bool)method.Invoke(null, new object[] { perkID }); } catch { } return false; }
-        private static IEnumerator ApplyDamageBuff(CharacterMainControl player) { string statName = "Damage"; float buffValue = 0.20f; var stats = player.CharacterItem.Stats; Stat statObj = stats.GetStat(statName); if (statObj != null) { Modifier dmgBuff = new Modifier(ModifierType.PercentageMultiply, buffValue, "RollSkillBuff"); statObj.AddModifier(dmgBuff); yield return new WaitForSeconds(3.0f); statObj.RemoveModifier(dmgBuff); } }
+
+        // 2. 修复坐标获取：防止 UI 访问 Graph 报错
+        [HarmonyPatch(typeof(Perk), "GetLayoutPosition")]
+        [HarmonyPrefix]
+        public static bool GetLayoutPosition_Prefix(Perk __instance, ref Vector2 __result)
+        {
+            if (__instance.Master != null && __instance.Master.name == SkillTreeManager.TREE_OBJ_NAME)
+            {
+                var rt = __instance.GetComponent<RectTransform>();
+                __result = rt != null ? rt.anchoredPosition : Vector2.zero;
+                return false; 
+            }
+            return true;
+        }
+
+        // 3. 修复解锁判断：防止 UI 访问 Graph 报错
+        [HarmonyPatch(typeof(PerkTree), "AreAllParentsUnlocked")]
+        [HarmonyPrefix]
+        public static bool AreAllParentsUnlocked_Prefix(PerkTree __instance, Perk perk, ref bool __result)
+        {
+            if (__instance.name == SkillTreeManager.TREE_OBJ_NAME)
+            {
+                if (perk.Requirement == null) { __result = true; return false; }
+
+                var req = perk.Requirement;
+                var listField = req.GetType().GetField("perks");
+                if (listField != null)
+                {
+                    var parents = listField.GetValue(req) as System.Collections.IList;
+                    if (parents != null)
+                    {
+                        foreach (Perk parent in parents)
+                        {
+                            if (!parent.Unlocked) { __result = false; return false; }
+                        }
+                    }
+                }
+                __result = true;
+                return false;
+            }
+            return true;
+        }
+
+        // 4. 修复描述文本显示
+        [HarmonyPatch(typeof(Perk), "Description", MethodType.Getter)]
+        [HarmonyPrefix]
+        public static bool Description_Getter_Prefix(Perk __instance, ref string __result)
+        {
+            if (__instance.Master != null && __instance.Master.name == SkillTreeManager.TREE_OBJ_NAME)
+            {
+                var holder = __instance.GetComponent<PerkDescriptionHolder>();
+                __result = holder != null ? holder.text : "No Description";
+                return false;
+            }
+            return true;
+        }
+
+        // 5. 阻止连线绘制崩溃
+        [HarmonyPatch(typeof(PerkTreeView), "RefreshConnections")]
+        [HarmonyPrefix]
+        public static bool RefreshConnections_Prefix(PerkTreeView __instance)
+        {
+            var targetField = typeof(PerkTreeView).GetField("target", BindingFlags.NonPublic | BindingFlags.Instance);
+            var target = targetField?.GetValue(__instance) as PerkTree;
+
+            if (target != null && target.name == SkillTreeManager.TREE_OBJ_NAME)
+            {
+                // 我们暂时不绘制连线，为了防止访问 Graph 报错，直接跳过原版逻辑
+                return false; 
+            }
+            return true;
+        }
+
+        // 工具方法
+        private static T? GetField<T>(object instance, string name) where T : class
+        {
+            var field = instance.GetType().GetField(name, BindingFlags.NonPublic | BindingFlags.Instance);
+            return field?.GetValue(instance) as T;
+        }
     }
 }
