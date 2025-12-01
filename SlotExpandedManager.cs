@@ -44,26 +44,31 @@ namespace PileErico
 
             foreach (var tagName in _customTags)
             {
-                // [关键修改] 饱和式本地化注册
-                // 把所有可能的前缀都注册一遍，彻底杜绝 "Tag_xxx" 或 "*tag_xxx*"
+                // 1. 本地化 (饱和式注册)
                 try 
                 {
-                    // 1. 针对 "Tag_誓约" (解决您刚才遇到的问题)
                     LocalizationManager.SetOverrideText($"Tag_{tagName}", tagName);
-
-                    // 2. 针对 "tag_誓约" (解决之前的 *tag_誓约*)
                     LocalizationManager.SetOverrideText($"tag_{tagName}", tagName);
-
-                    // 3. 针对 "誓约" (无前缀直查)
                     LocalizationManager.SetOverrideText(tagName, tagName);
-                    
-                    ModBehaviour.LogToFile($"[SlotExpandedManager] 本地化覆盖完毕: {tagName}");
                 }
                 catch (Exception) {}
 
-                // Tag 对象注册
-                if (TagUtilities.TagFromString(tagName) != null) continue;
+                // 2. [核心修复] 安静地检查 Tag 是否已存在
+                // 不再调用会报错的 TagUtilities.TagFromString
+                bool exists = false;
+                foreach (var t in rawTagList)
+                {
+                    // 只要名字对上就算存在
+                    if (t.name == tagName) 
+                    {
+                        exists = true;
+                        break;
+                    }
+                }
 
+                if (exists) continue; // 存在则跳过
+
+                // 3. 创建新 Tag
                 try
                 {
                     Tag newTag = ScriptableObject.CreateInstance<Tag>();
@@ -83,7 +88,6 @@ namespace PileErico
             AddOrFixExpandedSlots();
         }
 
-        // 包含读档修复逻辑
         private void AddOrFixExpandedSlots()
         {
             if (LevelManager.Instance == null || LevelManager.Instance.MainCharacter == null) return;
@@ -113,7 +117,6 @@ namespace PileErico
                 }
                 else
                 {
-                    // 修复读档后的空 Tag
                     if (EnsureSlotTags(slot, tagName))
                     {
                         anyChangeMade = true;
@@ -139,6 +142,8 @@ namespace PileErico
 
         private bool EnsureSlotTags(Slot slot, string tagName)
         {
+            // 注意：此时 Tag 肯定已经注册好了，所以调用这个方法不会报错
+            // 如果这里还报错，说明注册步骤真的失败了，那是需要知道的真错误
             Tag tag = TagUtilities.TagFromString(tagName);
             if (tag == null) return false;
 

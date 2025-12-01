@@ -1,3 +1,5 @@
+#nullable enable
+
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -15,6 +17,7 @@ using Newtonsoft.Json;
 using UnityEngine;
 using UnityEngine.Events; 
 using UnityEngine.SceneManagement;
+using SodaCraft.Localizations; // [新增] 引用本地化命名空间
 
 namespace PileErico
 {
@@ -52,8 +55,15 @@ namespace PileErico
         public class ShopInteractable : InteractableBase
         {
             private StockShop? _shop;
-            protected override void Awake() { base.Awake(); this.InteractName = "交易"; }
-            protected override void Start() { base.Start(); _shop = GetComponent<StockShop>(); }
+            
+            protected override void Start() 
+            { 
+                base.Start(); 
+                // [修改] 使用自定义 Key，而不是直接写中文
+                this.InteractName = "PE_Interaction_Trade"; 
+                _shop = GetComponent<StockShop>(); 
+            }
+
             protected override void OnInteractStart(CharacterMainControl interactCharacter)
             {
                 if (_shop == null) _shop = GetComponent<StockShop>();
@@ -64,7 +74,13 @@ namespace PileErico
 
         public class SkillInteractable : InteractableBase
         {
-            protected override void Awake() { base.Awake(); this.InteractName = "学习身法"; }
+            protected override void Start() 
+            { 
+                base.Start(); 
+                // [修改] 使用自定义 Key
+                this.InteractName = "PE_Interaction_SoulAscend"; 
+            }
+
             protected override void OnInteractStart(CharacterMainControl interactCharacter)
             {
                 if (SkillTreeManager.CustomRollTree != null) PerkTreeView.Show(SkillTreeManager.CustomRollTree);
@@ -90,6 +106,12 @@ namespace PileErico
         public void Initialize()
         {
             LoadConfig();
+            
+            // [新增] 注册自定义本地化文本
+            // 格式：SetOverrideText(Key, 显示内容)
+            LocalizationManager.SetOverrideText("PE_Interaction_Trade", "交易");
+            LocalizationManager.SetOverrideText("PE_Interaction_SoulAscend", "灵魂升华");
+            
             SceneManager.sceneLoaded += OnSceneLoaded;
             ModBehaviour.LogToFile("[NPCManager] 初始化完成。");
         }
@@ -97,6 +119,11 @@ namespace PileErico
         public void Deactivate()
         {
             SceneManager.sceneLoaded -= OnSceneLoaded;
+            
+            // [新增] 清理本地化文本
+            LocalizationManager.RemoveOverrideText("PE_Interaction_Trade");
+            LocalizationManager.RemoveOverrideText("PE_Interaction_SoulAscend");
+            
             if (NPCInstance != null) UnityEngine.Object.Destroy(NPCInstance);
         }
 
@@ -196,11 +223,7 @@ namespace PileErico
             var shop = host.AddComponent<StockShop>();
             SetPrivateField(shop, "merchantID", "PileErico_Hub_Merchant");
             
-            // [修复1] 启用账户支付 (解决只能用现金的问题)
             SetPrivateField(shop, "accountAvaliable", true); 
-
-            // [修复2] 设置刷新时间为24小时 (解决无限刷新和显示0的问题)
-            // StockShop 使用 Ticks (long) 来存储时间间隔
             SetPrivateField(shop, "refreshAfterTimeSpan", TimeSpan.FromHours(24).Ticks);
 
             shop.entries.Clear();
@@ -222,6 +245,9 @@ namespace PileErico
 
             var interact = host.AddComponent<ShopInteractable>();
             interact.interactMarkerOffset = new Vector3(0, 0.65f, 0); 
+            
+            // [关键] 赋值 Key
+            interact.InteractName = "PE_Interaction_Trade"; 
 
             var collider = host.GetComponent<Collider>();
             if (collider != null) interact.interactCollider = collider;
@@ -233,6 +259,9 @@ namespace PileErico
             var invoker = host.AddComponent<SkillInteractable>();
             invoker.MarkerActive = false; 
             invoker.interactMarkerOffset = new Vector3(0, 0.65f, 0);
+            
+            // [关键] 赋值 Key
+            invoker.InteractName = "PE_Interaction_SoulAscend";
 
             var collider = host.GetComponent<Collider>();
             if (collider != null) invoker.interactCollider = collider;

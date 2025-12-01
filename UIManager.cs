@@ -54,12 +54,12 @@ namespace PileErico
         private float _lastHunger = -1f;
         private float _lastThirst = -1f;
         private long _lastExp = -1;
-        private float _secondaryHpFill = 1f; // 用于缓冲条动画
+        private float _secondaryHpFill = 1f; 
 
         private float _checkTimer = 0f;
-        private const float CHIP_SPEED = 0.5f; // 缓冲条消失速度
+        private const float CHIP_SPEED = 0.5f; 
 
-        // 官方UI缓存列表 (避免每帧Find)
+        // 官方UI缓存列表 
         private List<CanvasGroup> _cachedOfficialUI = new List<CanvasGroup>();
         private bool _hasCachedOfficialUI = false;
 
@@ -84,24 +84,21 @@ namespace PileErico
         private float _statsOffsetY = 130f; 
         private float _statsOffsetX = 0f;
 
-        // [核心需求] 控制每1点血量/耐力对应的像素宽度
-        private const float HP_PIXELS_PER_POINT = 8f;       // 1点血 = 8像素宽
-        private const float STAMINA_PIXELS_PER_POINT = 3f;  // 1点耐力 = 3像素宽
-        private const float MAX_BAR_WIDTH = 2000f;          // 最大宽度限制
+        // [配置] 1点血 = 6像素宽
+        private const float HP_PIXELS_PER_POINT = 6f;       
+        private const float STAMINA_PIXELS_PER_POINT = 3f;  
+        private const float MAX_BAR_WIDTH = 2000f;          
 
-        // 颜色定义
         private readonly Color _colBorder = new Color(0.733f, 0.867f, 0.98f, 1f); 
         private readonly Color _colBackground = new Color(0.506f, 0.576f, 0.639f, 1f);
 
-        // [还原] 武器槽位置还原为默认，我们将单独移动弹药栏
         private readonly Vector2[] _weaponTargetPositions = new Vector2[]
         {
             new Vector2(240, 180),    // Slot 1
             new Vector2(400, 180),    // Slot 2
-            new Vector2(340.5f, 60)   // Slot V (还原回60)
+            new Vector2(340.5f, 60)   // Slot V
         };
 
-        // [新增] 弹药栏的目标位置 (X跟Slot V对齐，Y调高到 125 避开重叠)
         private readonly Vector2 _bulletHudTargetPos = new Vector2(335f, 135f);
 
         // ───── 生命周期与场景管理 ─────
@@ -118,7 +115,6 @@ namespace PileErico
 
         private void OnSceneChanged(Scene current, Scene next)
         {
-            // 场景切换时清理缓存
             _cachedIndividualSlots.Clear();
             _cachedOfficialUI.Clear();
             _hasCachedOfficialUI = false;
@@ -129,7 +125,6 @@ namespace PileErico
             _bulletCountHUD = null;
             _bulletCountRect = null;
             
-            // 重置状态记录
             _lastHealth = -1; _lastMaxHealth = -1;
             _lastStamina = -1; _lastMaxStamina = -1;
         }
@@ -137,12 +132,8 @@ namespace PileErico
         private void Start()
         {
             InitializeCanvas();
-            
-            // 创建血条 (开启缓冲条)
             _hpBar = CreateStatBar("HP_Bar", new Vector2(20, -155), new Vector2(100, 15), 
                 new Color(0.65f, 0.1f, 0.1f, 1f), hasSecondaryFill: true);
-            
-            // 创建耐力条
             _staminaBar = CreateStatBar("Stamina_Bar", new Vector2(20, -173), new Vector2(100, 15), 
                 new Color(0.1f, 0.6f, 0.25f, 1f));
 
@@ -159,36 +150,79 @@ namespace PileErico
 
         private void Update()
         {
-            // 1. 玩家有效性检查 (如果找不到玩家，就隐藏UI并每帧重试直到找到)
+            // 1. 玩家有效性检查
             if (!ValidatePlayerReference()) return;
 
-            // 2. UI 开关逻辑 (如果有打开的菜单/背包，隐藏HUD)
+            // =========================================================
+            // 2. [修改] UI 显示/隐藏逻辑
+            // =========================================================
+            
+            // A. 全局隐藏：如果有菜单/背包打开，隐藏整个 Canvas
             if (View.ActiveView != null)
             {
-                if (_canvasRoot != null && _canvasRoot.activeSelf) _canvasRoot.SetActive(false);
-                return;
+                if (_canvasRoot != null && _canvasRoot.activeSelf) 
+                    _canvasRoot.SetActive(false);
+                return; // 直接返回，节省性能
             }
-            if (_canvasRoot != null && !_canvasRoot.activeSelf) _canvasRoot.SetActive(true);
+            else
+            {
+                if (_canvasRoot != null && !_canvasRoot.activeSelf) 
+                    _canvasRoot.SetActive(true);
+            }
 
-            // 3. 数据更新逻辑 (包含脏标记检查)
-            UpdateHealthLogic();
-            UpdateStaminaLogic();
-            UpdateExpLogic();
+            // B. 部分隐藏：计算“是否需要隐藏血条和体力条”
+            bool hideBars = false;
+
+            // 条件1：正在对话 (DialogueUI系统)
+            if (Dialogues.DialogueUI.Active) hideBars = true;
+
+            // 条件2：持枪 + 开镜瞄准 + 特定倍镜
+            // 判定时间 > 0.4f
+            if (!hideBars && _player != null)
+            {
+                // 先判断瞄准进度，减少不必要的 GetComponent 调用
+                if (_player.AdsValue > 0.4f) 
+                {
+                    var currentGun = _player.GetGun(); // 获取当前持有的枪械
+                    if (currentGun != null && currentGun.Item != null)
+                    {
+                        // 获取 "Scope" 槽位的内容
+                        var scopeSlot = currentGun.Item.Slots.GetSlot("Scope");
+                        if (scopeSlot != null && scopeSlot.Content != null)
+                        {
+                            int scopeID = scopeSlot.Content.TypeID;
+                            // 检查是否为 4倍镜(568) 或 8倍镜(569)
+                            if (scopeID == 568 || scopeID == 569)
+                            {
+                                hideBars = true;
+                            }
+                        }
+                    }
+                }
+            }
+            // =========================================================
+
+            // 3. 数据更新逻辑 (传入 hideBars 参数控制显隐)
+            UpdateHealthLogic(hideBars);
+            UpdateStaminaLogic(hideBars);
+            
+            // 其他UI不隐藏
+            UpdateExpLogic(); 
             UpdateStatsLogic(); 
 
-            // 4. 布局维护 (每帧运行，因为可能有其他Mod干扰位置)
+            // 4. 布局维护
             ApplyWeaponSlotsPosition();
             MaintainShortcutPanel();
-            MaintainBulletCountHUD(); // [新增] 控制弹药栏位置
+            MaintainBulletCountHUD(); 
 
-            // 5. 官方UI隐藏逻辑 (优化：低频扫描，高频隐藏)
+            // 5. 官方UI隐藏逻辑
             _checkTimer += Time.deltaTime;
-            if (_checkTimer > 2.0f) // 每2秒尝试重新查找一次，以防有新UI生成
+            if (_checkTimer > 2.0f) 
             {
                 FindOfficialUIReferences();
                 _checkTimer = 0f;
             }
-            HideOfficialUI(); // 对已缓存的对象每帧执行隐藏
+            HideOfficialUI();
         }
 
         // ───── 核心逻辑 (优化版) ─────
@@ -213,20 +247,29 @@ namespace PileErico
             return true;
         }
 
-        private void UpdateHealthLogic()
+        // [修改] 增加 hide 参数控制显示
+        private void UpdateHealthLogic(bool hide)
         {
             var bar = _hpBar; 
-            if (bar == null || _playerHealth == null) return;
+            if (bar == null) return;
+
+            // 如果需要隐藏，直接设置不可见并返回
+            if (hide)
+            {
+                bar.SetActive(false);
+                return;
+            }
+            bar.SetActive(true); // 确保可见
+
+            if (_playerHealth == null) return;
 
             float current = _playerHealth.CurrentHealth;
             float max = _playerHealth.MaxHealth;
             if (max <= 0) max = 1;
 
-            // [需求实现] 动态宽度计算
             float targetWidth = Mathf.Clamp(max * HP_PIXELS_PER_POINT, 10f, MAX_BAR_WIDTH);
             float pct = Mathf.Clamp01(current / max);
 
-            // 只有当数值变化时才操作 UI (GC优化)
             if (Mathf.Abs(max - _lastMaxHealth) > 0.1f)
             {
                 bar.Root.sizeDelta = new Vector2(targetWidth, 15f);
@@ -234,33 +277,28 @@ namespace PileErico
                 if (bar.BgImage != null) bar.BgImage.rectTransform.sizeDelta = new Vector2(targetWidth, 15f);
                 if (bar.FillImage != null) bar.FillImage.rectTransform.sizeDelta = new Vector2(targetWidth, 15f);
                 if (bar.SecondaryFillImage != null) bar.SecondaryFillImage.rectTransform.sizeDelta = new Vector2(targetWidth, 15f);
-                
                 _lastMaxHealth = max;
             }
 
             if (Mathf.Abs(current - _lastHealth) > 0.1f)
             {
-                // 更新文字 (只有变化时才更新，减少字符串拼接)
                 if (bar.ValueText != null) 
                     bar.ValueText.text = $"{Mathf.CeilToInt(current)} / {Mathf.CeilToInt(max)}";
                 
                 if (bar.FillImage != null) bar.FillImage.fillAmount = pct;
                 
-                // 处理缓冲条 (当血量下降时)
                 if (pct < _secondaryHpFill)
                 {
-                    // 仅仅标记，Update里插值
+                    // 下降时标记
                 }
                 else
                 {
                     _secondaryHpFill = pct;
                     if (bar.SecondaryFillImage != null) bar.SecondaryFillImage.fillAmount = pct;
                 }
-
                 _lastHealth = current;
             }
 
-            // 缓冲条动画逻辑 (每帧独立运行)
             if (bar.SecondaryFillImage != null && _secondaryHpFill > pct)
             {
                 _secondaryHpFill -= Time.deltaTime * CHIP_SPEED;
@@ -269,10 +307,20 @@ namespace PileErico
             }
         }
 
-        private void UpdateStaminaLogic()
+        // [修改] 增加 hide 参数控制显示
+        private void UpdateStaminaLogic(bool hide)
         {
             var bar = _staminaBar;
-            if (bar == null || _player == null) return;
+            if (bar == null) return;
+
+            if (hide)
+            {
+                bar.SetActive(false);
+                return;
+            }
+            bar.SetActive(true);
+
+            if (_player == null) return;
 
             float current = _player.CurrentStamina;
             float max = _player.MaxStamina;
@@ -281,7 +329,6 @@ namespace PileErico
             float targetWidth = Mathf.Clamp(max * STAMINA_PIXELS_PER_POINT, 10f, MAX_BAR_WIDTH);
             float pct = Mathf.Clamp01(current / max);
 
-            // 1. 宽度更新
             if (Mathf.Abs(max - _lastMaxStamina) > 0.1f)
             {
                 bar.Root.sizeDelta = new Vector2(targetWidth, 15f);
@@ -291,7 +338,6 @@ namespace PileErico
                 _lastMaxStamina = max;
             }
 
-            // 2. 数值更新
             if (Mathf.Abs(current - _lastStamina) > 0.1f)
             {
                 if (bar.ValueText != null) 
@@ -299,10 +345,8 @@ namespace PileErico
                 _lastStamina = current;
             }
 
-            // 3. 平滑过渡 (每帧)
             if (bar.FillImage != null)
             {
-                // 使用 Lerp 让耐力条变化更顺滑
                 bar.FillImage.fillAmount = Mathf.Lerp(bar.FillImage.fillAmount, pct, Time.deltaTime * 15f);
             }
         }
@@ -313,7 +357,6 @@ namespace PileErico
 
             long currentExp = EXPManager.EXP;
             
-            // 只有经验值变化才重新计算等级
             if (currentExp != _lastExp)
             {
                 int level = EXPManager.Instance.LevelFromExp(currentExp);
@@ -343,7 +386,6 @@ namespace PileErico
         {
             if (_statsRoot == null || _player == null) return;
 
-            // 饥饿和水分
             float h = _player.CurrentEnergy;
             float w = _player.CurrentWater;
 
@@ -361,7 +403,6 @@ namespace PileErico
                 _lastThirst = w;
             }
             
-            // 位置复位 (防止其他代码修改位置)
             if (Vector2.Distance(_statsRoot.anchoredPosition, new Vector2(_statsOffsetX, _statsOffsetY)) > 0.1f)
                 _statsRoot.anchoredPosition = new Vector2(_statsOffsetX, _statsOffsetY);
         }
@@ -638,7 +679,6 @@ namespace PileErico
                 rt.anchoredPosition = _shortcutCenterOffset;
         }
 
-        // [新增] 专门用于移动 BulletCountHUD (弹药栏) 的位置
         private void MaintainBulletCountHUD()
         {
             if (_bulletCountHUD == null || _bulletCountRect == null)
@@ -661,7 +701,7 @@ namespace PileErico
             rt.anchorMax = Vector2.zero;
             rt.pivot     = Vector2.zero;
 
-            // _bulletHudTargetPos 为 (340.5, 125)，比武器槽 (60) 高出 65 像素，避免重叠
+            // _bulletHudTargetPos 为 (335, 135)
             if (Vector2.Distance(rt.anchoredPosition, _bulletHudTargetPos) > 0.1f)
             {
                 rt.anchoredPosition = _bulletHudTargetPos;
