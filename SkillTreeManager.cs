@@ -44,7 +44,12 @@ namespace PileErico
         }
 
         public void Initialize()
-        {
+        {   
+            // ==============================================================
+            // [新增] 检查配置开关
+            // 如果玩家在配置文件里关闭了"灵魂升华技能树"，这里直接 return
+            // ==============================================================
+            if (!SettingManager.EnableSkillTree) return;
             RegisterAutoText("PerkTree_" + TREE_UNIQUE_ID, "灵魂升华");
             SceneManager.sceneLoaded += OnSceneLoaded;
         }
@@ -71,13 +76,100 @@ namespace PileErico
             }
             Instance = null;
         }
+        
+        public void SaveLocalData()
+        {
+            if (CustomRollTree == null) return;
+            try
+            {
+                SkillSaveData data = new SkillSaveData();
+                foreach (var perk in CustomRollTree.Perks)
+                {
+                    if (perk.Unlocked) data.UnlockedPerkIDs.Add(perk.name);
+                }
 
+                string? dir = Path.GetDirectoryName(SaveFilePath);
+                if (dir != null && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+
+                File.WriteAllText(SaveFilePath, JsonUtility.ToJson(data, true));
+                ModBehaviour.LogToFile($"[SkillTreeManager] 存档已更新 ({data.UnlockedPerkIDs.Count} 个技能)");
+            }
+            catch (Exception ex) { ModBehaviour.LogErrorToFile($"保存失败: {ex.Message}"); }
+        }
+
+        // [新增 4] 读取逻辑：从文件恢复技能状态
+        public void LoadLocalData()
+        {
+            if (CustomRollTree == null || !File.Exists(SaveFilePath)) return;
+            try
+            {
+                string json = File.ReadAllText(SaveFilePath);
+                SkillSaveData data = JsonUtility.FromJson<SkillSaveData>(json);
+
+                if (data != null && data.UnlockedPerkIDs != null)
+                {
+                    var unlockProp = typeof(Perk).GetProperty("Unlocked");
+                    foreach (var perk in CustomRollTree.Perks)
+                    {
+                        if (data.UnlockedPerkIDs.Contains(perk.name))
+                            unlockProp?.SetValue(perk, true); // 强制解锁
+                    }
+                    ModBehaviour.LogToFile($"[SkillTreeManager] 已恢复存档: {data.UnlockedPerkIDs.Count} 个技能");
+                }
+            }
+            catch (Exception ex) { ModBehaviour.LogErrorToFile($"读取失败: {ex.Message}"); }
+        }
+        
         private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
         {
             if (scene.name == "Base_SceneV2" || scene.name == "Base")
             {
                 _mod.StartCoroutine(BuildTreeRoutine());
             }
+        }
+
+        // [修改] 动态存档路径：根据当前游戏存档槽位 (CurrentSlot) 生成不同的文件名
+        // 效果：存档1 -> SkillTreeSave_Slot_1.json, 存档2 -> SkillTreeSave_Slot_2.json
+        private string SaveFilePath 
+        {
+            get 
+            {
+                string saveID = "Global"; // 默认值（防错）
+
+                try 
+                {
+                    // 获取当前游戏存档槽位 (1, 2, 3...)
+                    // 需要确保引用了 Saves 命名空间，或者写全名 Saves.SavesSystem.CurrentSlot
+                    int slotIndex = Saves.SavesSystem.CurrentSlot; 
+                    saveID = $"Slot_{slotIndex}";
+                }
+                catch 
+                {
+                    // 兜底逻辑：如果获取失败尝试用玩家名
+                    if (CharacterMainControl.Main != null)
+                    {
+                        saveID = CharacterMainControl.Main.name.Replace("(Clone)", "").Trim();
+                    }
+                }
+
+                // =========================================================
+                // 修改核心：路径指向 Duckov_Data/Mods/DuckSouls
+                // =========================================================
+                
+                // Application.dataPath 在 Windows 编译版中直接就是 ".../Duckov_Data"
+                // 所以我们只需要往后拼接 "Mods" 和 "DuckSouls"
+                string saveDir = Path.Combine(Application.dataPath, "Mods", "DuckSouls");
+
+                // 最终生成类似: .../Duckov_Data/Mods/DuckSouls/SkillTreeSave_Slot_1.json
+                return Path.Combine(saveDir, $"SkillTreeSave_{saveID}.json");
+            }
+        }
+
+        // [新增 2] 简易存档数据结构类
+        [Serializable]
+        public class SkillSaveData
+        {
+            public List<string> UnlockedPerkIDs = new List<string>();
         }
 
         // =========================================================
@@ -102,7 +194,7 @@ namespace PileErico
                     if (!isResetNode) resetCount++;
                 }
             }
-
+            SaveLocalData();
             if (resetCount > 0)
             {
                 player.PopText("<color=#00FFFF>记忆已重置</color>", 2.0f);
@@ -519,12 +611,12 @@ namespace PileErico
                     new ModifyCharacterStatsBase.Entry { key = "MaxHealth", value = 10f},
                 }
             );
-            // --- 牢登 ---
+            // --- 劳登 ---
             Perk L1 = CreatePerk(
                 id: "Lordon_I",
-                name: "<b><color=#6E8DC9>牢登</color></b>的灵魂升华",
-                desc: "通过与<b><color=#6E8DC9>牢登</color></b>的<b><color=#7EC1D9>灵魂能量碎片</color></b>产生共鸣\n你将获得来自<b><color=#6E8DC9>牢登</color></b>的力量\n\n降低 5% 射击散布",
-                iconName: "牢登.png", 
+                name: "<b><color=#6E8DC9>劳登</color></b>的灵魂升华",
+                desc: "通过与<b><color=#6E8DC9>劳登</color></b>的<b><color=#7EC1D9>灵魂能量碎片</color></b>产生共鸣\n你将获得来自<b><color=#6E8DC9>劳登</color></b>的力量\n\n降低 5% 射击散布",
+                iconName: "劳登.png", 
                 uiPos: new Vector2(-40, 450),
                 costs: new List<(int, int)> { (2025111103, 1) },
                 reqLevel: 15,
@@ -535,9 +627,9 @@ namespace PileErico
 
             Perk L2 = CreatePerk(
                 id: "Lordon_II",
-                name: "<b><color=#6E8DC9>牢登</color></b>的灵魂升华：生存 I",
-                desc: "你从<b><color=#6E8DC9>牢登</color></b>的灵魂中攫取了力量的碎片\n你感到自己变得更加娴熟\n这使你可以在户外坚持更长时间\n\n提高 10 <b><color=#F08E05>饱腹上限</color></b>\n提高 10 <b><color=#4B90D6>水分上限</color></b>",
-                iconName: "牢登.png", 
+                name: "<b><color=#6E8DC9>劳登</color></b>的灵魂升华：生存 I",
+                desc: "你从<b><color=#6E8DC9>劳登</color></b>的灵魂中攫取了力量的碎片\n你感到自己变得更加娴熟\n这使你可以在户外坚持更长时间\n\n提高 10 <b><color=#F08E05>饱腹上限</color></b>\n提高 10 <b><color=#4B90D6>水分上限</color></b>",
+                iconName: "劳登.png", 
                 uiPos: new Vector2(-60, 525),
                 costs: new List<(int, int)> { (2025111103, 1) },
                 reqLevel: 17,
@@ -549,9 +641,9 @@ namespace PileErico
 
             Perk L3 = CreatePerk(
                 id: "Lordon_III",
-                name: "<b><color=#6E8DC9>牢登</color></b>的灵魂升华：生存 II",
-                desc: "你从<b><color=#6E8DC9>牢登</color></b>的灵魂中攫取了力量的碎片\n你感到自己变得更加娴熟\n这使你可以减少自己发出的噪音\n\n略微降低行动时的噪音范围",
-                iconName: "牢登.png", 
+                name: "<b><color=#6E8DC9>劳登</color></b>的灵魂升华：生存 II",
+                desc: "你从<b><color=#6E8DC9>劳登</color></b>的灵魂中攫取了力量的碎片\n你感到自己变得更加娴熟\n这使你可以减少自己发出的噪音\n\n略微降低行动时的噪音范围",
+                iconName: "劳登.png", 
                 uiPos: new Vector2(-60, 600),
                 costs: new List<(int, int)> { (2025111103, 1) },
                 reqLevel: 19,
@@ -563,9 +655,9 @@ namespace PileErico
 
             Perk L4 = CreatePerk(
                 id: "Lordon_IV",
-                name: "<b><color=#6E8DC9>牢登</color></b>的灵魂升华：精准 I",
-                desc: "你从<b><color=#6E8DC9>牢登</color></b>的灵魂中攫取了力量的碎片\n你感到自己变得更加专注\n这使你的射程变得更远\n\n提高 10% 射程",
-                iconName: "牢登.png", 
+                name: "<b><color=#6E8DC9>劳登</color></b>的灵魂升华：精准 I",
+                desc: "你从<b><color=#6E8DC9>劳登</color></b>的灵魂中攫取了力量的碎片\n你感到自己变得更加专注\n这使你的射程变得更远\n\n提高 10% 射程",
+                iconName: "劳登.png", 
                 uiPos: new Vector2(-20, 525),
                 costs: new List<(int, int)> { (2025111103, 1) },
                 reqLevel: 17,
@@ -575,9 +667,9 @@ namespace PileErico
             );
             Perk L5 = CreatePerk(
                 id: "Lordon_V",
-                name: "<b><color=#6E8DC9>牢登</color></b>的灵魂升华：精准 II",
-                desc: "你从<b><color=#6E8DC9>牢登</color></b>的灵魂中攫取了力量的碎片\n你感到自己变得更加专注\n这使你的射击精度进一步提高\n\n降低 10% 射击散布",
-                iconName: "牢登.png", 
+                name: "<b><color=#6E8DC9>劳登</color></b>的灵魂升华：精准 II",
+                desc: "你从<b><color=#6E8DC9>劳登</color></b>的灵魂中攫取了力量的碎片\n你感到自己变得更加专注\n这使你的射击精度进一步提高\n\n降低 10% 射击散布",
+                iconName: "劳登.png", 
                 uiPos: new Vector2(-20, 600),
                 costs: new List<(int, int)> { (2025111103, 1) },
                 reqLevel: 19,
@@ -588,8 +680,8 @@ namespace PileErico
 
             Perk L6 = CreatePerk(
                 id: "Lordon_VI",
-                name: "<b><color=#6E8DC9>牢登</color></b>的灵魂升华：狙击手",
-                desc: "你从<b><color=#6E8DC9>牢登</color></b>的灵魂中攫取了全部的碎片\n<b><color=#6E8DC9>牢登</color></b>的力量在你的体内回响\n你感到无比平静\n\n提高 15% 远程暴击率\n提高 15% 远程暴击伤害\n<b><color=#9E0000>降低 10 生命上限</color></b>\n<b><color=#9E0000>降低 10 体力上限</color></b>",
+                name: "<b><color=#6E8DC9>劳登</color></b>的灵魂升华：狙击手",
+                desc: "你从<b><color=#6E8DC9>劳登</color></b>的灵魂中攫取了全部的碎片\n<b><color=#6E8DC9>劳登</color></b>的力量在你的体内回响\n你感到无比平静\n\n提高 15% 远程暴击率\n提高 15% 远程暴击伤害\n<b><color=#9E0000>降低 10 生命上限</color></b>\n<b><color=#9E0000>降低 10 体力上限</color></b>",
                 iconName: "狙击手.png", 
                 uiPos: new Vector2(-40, 675),
                 costs: new List<(int, int)> { (2025111103, 2) },
@@ -604,9 +696,9 @@ namespace PileErico
 
             Perk L7 = CreatePerk(
                 id: "Lordon_VII",
-                name: "<b><color=#6E8DC9>牢登的爱犬</color></b>",
-                desc: "<b><color=#6E8DC9>牢登的狗</color></b>是<b><color=#6E8DC9>牢登</color></b>最信任的伙伴\n彼此间的牵绊让他们的<b><color=#7EC1D9>灵魂</color></b>\n紧密相连\n\n提高 1 宠物物品栏上限",
-                iconName: "牢登.png", 
+                name: "<b><color=#6E8DC9>劳登的爱犬</color></b>",
+                desc: "<b><color=#6E8DC9>劳登的狗</color></b>是<b><color=#6E8DC9>劳登</color></b>最信任的伙伴\n彼此间的牵绊让他们的<b><color=#7EC1D9>灵魂</color></b>\n紧密相连\n\n提高 1 宠物物品栏上限",
+                iconName: "劳登.png", 
                 uiPos: new Vector2(-40, 750),
                 costs: new List<(int, int)> { (2025111103, 1) },
                 reqLevel: 21,
@@ -752,7 +844,7 @@ namespace PileErico
             ConnectPerks(SE1, SE2);ConnectPerks(SE2, SE3);
             ConnectPerks(SE1, SE4);ConnectPerks(SE4, SE5);
             ConnectPerks(SE3, SE6);ConnectPerks(SE5, SE6);
-            //牢登
+            //劳登
             ConnectPerks(DS2, L1);
             ConnectPerks(L1, L2);ConnectPerks(L2, L3);
             ConnectPerks(L1, L4);ConnectPerks(L4, L5);
@@ -764,6 +856,9 @@ namespace PileErico
             ConnectPerks(SC1, SC4);ConnectPerks(SC4, SC5);
             ConnectPerks(SC3, SC6);ConnectPerks(SC5, SC6);
             ConnectPerks(SC6, SC7);
+            
+            // [插入点] 构建完毕后，立即读取本地存档
+            LoadLocalData();
 
             treeObj.SetActive(true);
             if (PerkTreeManager.Instance != null && !PerkTreeManager.Instance.perkTrees.Contains(CustomRollTree))
@@ -796,6 +891,8 @@ namespace PileErico
 
             Perk perk = go.AddComponent<Perk>();
             perk.name = id;
+            // [插入点] 挂载自动保存组件，这样一点技能就会自动存盘
+            go.AddComponent<PerkAutoSaveBehaviour>();
 
             string nameKey = $"PE_Name_{id}"; 
             RegisterAutoText(nameKey, name); 
@@ -844,6 +941,8 @@ namespace PileErico
 
             Perk perk = go.AddComponent<Perk>();
             perk.name = id;
+            // [插入点] 挂载自动保存组件，这样一点技能就会自动存盘
+            go.AddComponent<PerkAutoSaveBehaviour>();
 
             string nameKey = $"PE_Name_{id}"; 
             RegisterAutoText(nameKey, name); 
@@ -982,5 +1081,14 @@ namespace PileErico
     public class SilentModifyCharacterStats : ModifyCharacterStatsBase
     {
         public override string Description => string.Empty;
+    }
+    // [新增 5] 自动保存组件：监听技能解锁事件
+    public class PerkAutoSaveBehaviour : PerkBehaviour
+    {
+        protected override void OnUnlocked()
+        {
+            // 只要玩家点亮了这个技能，就通知管理器保存
+            SkillTreeManager.Instance?.SaveLocalData();
+        }
     }
 }

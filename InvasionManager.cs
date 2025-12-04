@@ -3,7 +3,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using System.Text.RegularExpressions;
 using Cysharp.Threading.Tasks;
 using Duckov;
 using Duckov.UI;       
@@ -17,54 +16,53 @@ using Random = UnityEngine.Random;
 
 namespace PileErico
 {
+    /// <summary>
+    /// 入侵事件管理器 (Final Version)
+    /// 集成 30米 Boss 避让、详细日志与独立扫描逻辑
+    /// </summary>
     public class InvasionManager
     {
-        // --- 引用 ---
         private readonly ModBehaviour modBehaviour;
-        private readonly BossHealthHUDManager bossManager;
-
-        // --- 配置 ---
-        // 频率: 10秒一次; 概率: 2%; 冷却: 3分钟
+        
+        // 检查频率 (秒)
         private const float CheckInterval = 10f;      
+        // 每次检查触发入侵的概率 (2%)
         private const float InvasionChance = 0.02f;   
+        
+        // [配置] 30米内有 Boss 则视为战斗中，不打扰
+        private const float BossSafeZoneRadius = 30f;
 
-        // --- 物品 ID ---
-        private const int MolotovID = 941;    
-        private const int FlashbangID = 66;   
-        private const int PoisonGasID = 933;  
-
-        // --- 状态 ---
         private bool isInvading = false;
         private enum FingerType { Thumb, Index, Middle, Ring, Little }
         private List<FingerType> availableFingers = new List<FingerType>();
 
+        // 候选入侵者预设库 (从场景中扫描到的小怪)
         private List<CharacterRandomPreset> candidatePresets = new List<CharacterRandomPreset>();
         private HashSet<string> recordedPresetNames = new HashSet<string>();
 
-        // --- UI 组件 ---
+        // UI 引用
         private GameObject? _uiRoot;
         private CanvasGroup? _uiCanvasGroup;
         private Text? _uiText;
         private Coroutine? _animationCoroutine;
 
-        public InvasionManager(ModBehaviour mod, BossHealthHUDManager bossMgr)
+        // 构造函数 (已解耦，只需 ModBehaviour)
+        public InvasionManager(ModBehaviour mod)
         {
             this.modBehaviour = mod;
-            this.bossManager = bossMgr;
         }
 
         public void Initialize()
         {
-            // [配置检查] 如果在 ModBehaviour 中关闭了入侵，则不启动
-            if (!ModBehaviour.Config.EnableInvasion)
+            if (!SettingManager.EnableInvasion)
             {
-                ModBehaviour.LogToFile("[InvasionManager] 配置检测: 入侵功能已禁用 (EnableInvasion = false)。");
+                ModBehaviour.LogToFile("[InvasionManager] 配置检测: 入侵功能已禁用。");
                 return;
             }
 
-            ModBehaviour.LogToFile("[InvasionManager] 正在初始化 (Final Complete Version)...");
+            ModBehaviour.LogToFile("[InvasionManager] 正在初始化...");
             
-            // 初始化冠名池
+            // 重置手指列表
             availableFingers = new List<FingerType>() {
                 FingerType.Thumb, FingerType.Index, FingerType.Middle, FingerType.Ring, FingerType.Little
             };
@@ -74,6 +72,7 @@ namespace PileErico
 
             CreateInvasionUI();
 
+            // 启动循环检查
             modBehaviour.StartCoroutine(InvasionCheckRoutine());
         }
 
@@ -82,82 +81,34 @@ namespace PileErico
             if (_uiRoot != null) UnityEngine.Object.Destroy(_uiRoot);
         }
 
-        private void CreateInvasionUI()
-        {
-            GameObject canvasObj = new GameObject("PileErico_InvasionCanvas");
-            UnityEngine.Object.DontDestroyOnLoad(canvasObj);
-            Canvas canvas = canvasObj.AddComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.sortingOrder = 2000; 
-            CanvasScaler scaler = canvasObj.AddComponent<CanvasScaler>();
-            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            scaler.referenceResolution = new Vector2(1920, 1080);
-            _uiRoot = canvasObj;
-
-            GameObject bgObj = new GameObject("BackgroundBar");
-            bgObj.transform.SetParent(canvasObj.transform, false);
-            Image bgImage = bgObj.AddComponent<Image>();
-            bgImage.color = new Color(0f, 0f, 0f, 0.85f); 
-            RectTransform bgRect = bgImage.GetComponent<RectTransform>();
-            bgRect.anchorMin = new Vector2(0, 0.5f); 
-            bgRect.anchorMax = new Vector2(1, 0.5f); 
-            bgRect.pivot = new Vector2(0.5f, 0.5f);
-            bgRect.sizeDelta = new Vector2(0, 100);  
-            bgRect.anchoredPosition = new Vector2(0, -250); 
-
-            GameObject textObj = new GameObject("InvasionText");
-            textObj.transform.SetParent(bgObj.transform, false);
-            _uiText = textObj.AddComponent<Text>();
-            _uiText.font = Resources.GetBuiltinResource<Font>("Arial.ttf");
-            _uiText.fontSize = 42;
-            _uiText.alignment = TextAnchor.MiddleCenter;
-            _uiText.color = Color.white;
-            _uiText.supportRichText = true;
-            Shadow shadow = textObj.AddComponent<Shadow>();
-            shadow.effectColor = new Color(0, 0, 0, 1f);
-            shadow.effectDistance = new Vector2(2, -2);
-            RectTransform textRect = _uiText.GetComponent<RectTransform>();
-            textRect.anchorMin = Vector2.zero;
-            textRect.anchorMax = Vector2.one;
-            textRect.sizeDelta = Vector2.zero;
-
-            _uiCanvasGroup = bgObj.AddComponent<CanvasGroup>();
-            _uiCanvasGroup.alpha = 0f; 
-            _uiCanvasGroup.blocksRaycasts = false; 
-        }
-
+        /// <summary>
+        /// 主循环：定期检查是否满足入侵条件
+        /// </summary>
         private IEnumerator InvasionCheckRoutine()
         {
             while (true)
             {
                 yield return new WaitForSeconds(CheckInterval);
 
-                // 1. 枯竭检查
-                if (availableFingers.Count == 0)
-                {
-                    ModBehaviour.LogToFile("[InvasionManager] 所有冠名雇佣兵已全部出场，本局入侵结束。");
-                    yield break;
-                }
+                // 如果手指用完了，不再触发
+                if (availableFingers.Count == 0) yield break;
+                
+                // 基础环境检查
+                if (LevelManager.Instance == null || LevelManager.Instance.IsBaseLevel) continue;
+                if (!LevelManager.LevelInited || CharacterMainControl.Main == null || CharacterMainControl.Main.Health.IsDead) continue;
 
-                // 2. 基地安全检查
-                if (LevelManager.Instance == null || LevelManager.Instance.IsBaseLevel)
-                    continue;
-
-                // 3. 基础合法性检查
-                if (!LevelManager.LevelInited || CharacterMainControl.Main == null || CharacterMainControl.Main.Health.IsDead)
-                    continue;
-
-                // 4. 扫描并积累候选人
+                // 1. 扫描并录入场景中的小怪信息 (为入侵做准备)
                 ScanSceneEnemies();
 
-                // 5. 正在入侵中
+                // 如果正在入侵中，跳过
                 if (isInvading) continue;
 
-                // 6. 附近 Boss 检查
-                int nearbyBosses = bossManager != null ? bossManager.GetTrackedBossCount() : 0;
+                // 2. [核心逻辑] 检查是否处于 Boss 战状态
+                // 利用 ScanManager 快速查询玩家周围 30米 是否有 Boss
+                bool isBossNearby = ScanManager.IsBossNearby(CharacterMainControl.Main.transform.position, BossSafeZoneRadius);
 
-                // 7. 触发判定
-                if (nearbyBosses == 0)
+                // 只有在安全（没有 Boss）的情况下才尝试触发
+                if (!isBossNearby)
                 {
                     if (Random.value < InvasionChance)
                     {
@@ -167,82 +118,106 @@ namespace PileErico
             }
         }
 
+        /// <summary>
+        /// 扫描场景，寻找适合作为入侵者原型的单位
+        /// </summary>
         private void ScanSceneEnemies()
         {
+            int addedCount = 0;
             try
             {
-                var allChars = UnityEngine.Object.FindObjectsOfType<CharacterMainControl>();
-                foreach (var c in allChars)
+                // 使用 ScanManager 维护的全局列表，效率更高
+                foreach (var c in ScanManager.ActiveCharacters)
                 {
                     if (c == null || c.characterPreset == null) continue;
-                    if (c == CharacterMainControl.Main || c.Health.IsDead) continue; 
+                    if (ScanManager.IsPlayer(c) || c.Health.IsDead) continue; 
+
+                    // [关键] 排除 Boss
+                    // ScanManager 现已修复判定逻辑，不会再把雇佣兵误判为 Boss
+                    // 因此雇佣兵会通过此检查，进入下方的录入流程
+                    if (ScanManager.IsBoss(c)) continue;
 
                     string pName = c.characterPreset.name;
                     string pDispName = c.characterPreset.nameKey;
 
+                    // 防止重复录入
                     if (recordedPresetNames.Contains(pName)) continue;
                     
-                    // 黑名单过滤
+                    // 过滤友军、商人、动物等不适合入侵的单位
                     if (pName.Contains("Merchant") || pName.Contains("Pet") || pName.Contains("Wolf") || pName.Contains("Animal")) 
                         continue;
                     
-                    if (bossManager != null && bossManager.IsKnownBoss(c)) continue;
-
+                    // 过滤特殊单位 (名字带颜色代码的一般是特殊怪)
                     if (pDispName.Contains("<color") || pDispName.Contains("[")) continue;
 
+                    // 录入成功
                     candidatePresets.Add(c.characterPreset);
                     recordedPresetNames.Add(pName);
-                    ModBehaviour.LogToFile($"[InvasionManager] 录入新候选单位: {c.characterPreset.DisplayName} ({pName})");
+                    addedCount++;
+                    
+                    // [调试日志] 明确打印录入的单位名称
+                    ModBehaviour.LogToFile($"[InvasionManager] 录入新样本: {pName} (显示名: {c.characterPreset.DisplayName})");
                 }
             }
             catch (Exception ex)
             {
                 ModBehaviour.LogErrorToFile($"[InvasionManager] 扫描出错: {ex.Message}");
             }
+
+            if (addedCount > 0)
+            {
+                ModBehaviour.LogToFile($"[InvasionManager] 本轮扫描新增 {addedCount} 个样本，当前总库: {candidatePresets.Count}");
+            }
         }
 
+        /// <summary>
+        /// 触发入侵流程
+        /// </summary>
         private async UniTaskVoid TriggerInvasionSequence()
         {
+            // 如果没有样本，无法生成
             if (candidatePresets.Count == 0) return;
 
             isInvading = true;
 
             if (availableFingers.Count == 0) { isInvading = false; return; }
 
-            // 1. 寻找生成点 (高空射线法)
+            // 寻找生成点 (空投逻辑)
             Vector3? validSpawnPos = GetAirDropSpawnPosition(CharacterMainControl.Main.transform.position, 8f, 18f);
             
             if (validSpawnPos == null)
             {
-                // 地形不合适则跳过
+                // 找不到位置，放弃本次入侵
                 isInvading = false;
                 return;
             }
 
+            // 随机抽取一个手指代号
             int idx = Random.Range(0, availableFingers.Count);
             FingerType finger = availableFingers[idx];
             availableFingers.RemoveAt(idx); 
 
-            // 2. 准备数据
+            // 随机抽取一个敌人模板
             CharacterRandomPreset basePreset = candidatePresets[Random.Range(0, candidatePresets.Count)];
             string fingerTitle = GetFingerTitle(finger);
-            string cleanName = CleanName(basePreset.DisplayName);
+            string cleanName = basePreset.DisplayName.Replace("*", "").Replace("(Clone)", "").Trim();
             
+            // 创建强化版预设
             CharacterRandomPreset modifiedPreset = PrepareModifiedPreset(basePreset, fingerTitle, cleanName, finger);
 
-            // 3. UI 提示
+            // UI 提示
             string message = $"遭到 <color=#FF2020>{fingerTitle}</color> {cleanName} 入侵";
             if (_animationCoroutine != null) modBehaviour.StopCoroutine(_animationCoroutine);
             _animationCoroutine = modBehaviour.StartCoroutine(ShowInvasionAnimation(message));
             
             ModBehaviour.LogToFile($"[InvasionManager] 触发入侵: {message}");
 
-            // 4. 等待动画 (4秒)
+            // 延迟 4 秒后生成
             await UniTask.Delay(4000);
 
-            // 5. 生成单位
             if (CharacterMainControl.Main != null)
             {
+                // 异步生成单位
                 CharacterMainControl enemy = await modifiedPreset.CreateCharacterAsync(
                     validSpawnPos.Value, 
                     Vector3.forward, 
@@ -253,19 +228,19 @@ namespace PileErico
 
                 if (enemy != null)
                 {
-                    enemy.SetTeam(Teams.scav); 
-                    ApplyFingerBuffs(enemy, finger);
+                    enemy.SetTeam(Teams.scav); // 设为敌对阵营
+                    ApplyFingerBuffs(enemy, finger); // 应用 Buff
                     enemy.name = $"{fingerTitle}_{enemy.name}";
                     
-                    // 登场台词
+                    // 出场台词
                     string dialogue = GetFingerEntranceLine(finger);
                     enemy.PopText(dialogue, 4f);
 
-                    // 挂载战斗对话
+                    // 添加战斗对话组件
                     var talker = enemy.gameObject.AddComponent<InvaderCombatTalker>();
                     talker.Setup(enemy, GetFingerCombatLines(finger));
 
-                    // 启动离去监控
+                    // 启动监控 (超时或过远则消失)
                     MonitorInvader(enemy, fingerTitle, cleanName).Forget();
                 }
                 else
@@ -274,12 +249,15 @@ namespace PileErico
                 }
             }
 
-            // 6. 冷却 3分钟
+            // 冷却时间 3 分钟
             await UniTask.Delay(180000); 
             isInvading = false;
         }
 
-        // --- 台词库 ---
+        // =========================================================
+        //  数据与配置区 (台词、Buff、生成逻辑)
+        // =========================================================
+
         private string[] GetFingerCombatLines(FingerType t) => t switch {
             FingerType.Thumb => new[] { "不痛不痒。", "就这？", "我会碾碎你！", "不过是徒劳。" },
             FingerType.Index => new[] { "我准备好了。", "面对我！", "一击致命！", "哈！" },
@@ -298,42 +276,37 @@ namespace PileErico
             _ => "……"
         };
 
-        // --- 预设修改 ---
         private CharacterRandomPreset PrepareModifiedPreset(CharacterRandomPreset original, string title, string cleanName, FingerType finger)
         {
             var clone = UnityEngine.Object.Instantiate(original);
             string newName = $"<color=#FF2020>[{title}]</color> {cleanName}";
             clone.nameKey = newName;
 
-            // 疯狗 AI
+            // 极高的感知能力，确保它能追着玩家打
             clone.forceTracePlayerDistance = 9999f; 
             clone.sightAngle = 360f;
             clone.sightDistance = 100f;
             clone.forgetTime = 999f;
             clone.hearingAbility = 10f;
 
-            // 指头特性调整
+            // 基础属性微调
             switch (finger)
             {
                 case FingerType.Thumb: 
-                    clone.moveSpeedFactor *= 0.8f; // 减速
+                    clone.moveSpeedFactor *= 0.8f; // 坦克走得慢
                     break;
-
                 case FingerType.Middle: 
-                    clone.moveSpeedFactor *= 1.5f; // 加速
+                    clone.moveSpeedFactor *= 1.5f; // 突击手很快
                     clone.reactionTime *= 0.1f;    
                     clone.shootDelay *= 0.1f;      
                     break;
-
                 case FingerType.Little: 
                     clone.moveSpeedFactor *= 1.15f; 
                     break;
             }
-
             return clone;
         }
 
-        // --- 属性与Buff应用 ---
         private void ApplyFingerBuffs(CharacterMainControl enemy, FingerType type)
         {
             Item item = enemy.CharacterItem;
@@ -343,16 +316,15 @@ namespace PileErico
 
             switch (type)
             {
-                case FingerType.Thumb: 
+                case FingerType.Thumb: // 拇指：坦克
                     hpMultiplier = 4.0f;
-                    enemy.transform.localScale *= 2.0f; 
+                    enemy.transform.localScale *= 1.2f; // 体型变大
                     Stat bodyArmor = item.GetStat("BodyArmor".GetHashCode());
                     Stat headArmor = item.GetStat("HeadArmor".GetHashCode());
-                    if (bodyArmor != null) bodyArmor.BaseValue += 1f; 
-                    if (headArmor != null) headArmor.BaseValue += 1f;
+                    if (bodyArmor != null) bodyArmor.BaseValue += 2f; 
+                    if (headArmor != null) headArmor.BaseValue += 2f;
                     break;
-
-                case FingerType.Index: 
+                case FingerType.Index: // 食指：狙击/高伤
                     hpMultiplier = 3.0f;
                     Stat gunDmg = item.GetStat("GunDamageMultiplier".GetHashCode());
                     Stat meleeDmg = item.GetStat("MeleeDamageMultiplier".GetHashCode());
@@ -360,25 +332,22 @@ namespace PileErico
                     if (meleeDmg != null) meleeDmg.BaseValue *= 1.5f;
                     AddRegen(enemy, 0.5f);
                     break;
-
-                case FingerType.Middle: 
+                case FingerType.Middle: // 中指：速射
                     hpMultiplier = 2.0f;
                     Stat reload = item.GetStat("ReloadSpeedGain".GetHashCode());
                     if (reload != null) reload.BaseValue += 0.5f;
                     AddRegen(enemy, 0.5f);
                     break;
-
-                case FingerType.Ring: 
+                case FingerType.Ring: // 无名指：Debuff 光环
                     hpMultiplier = 2.0f;
                     ApplyGhostVisuals(enemy);
                     enemy.gameObject.AddComponent<RingFingerRandomDebuffAura>();
                     AddRegen(enemy, 0.5f);
                     break;
-
-                case FingerType.Little: 
+                case FingerType.Little: // 小指：强力回血
                     hpMultiplier = 2.0f;
-                    enemy.transform.localScale *= 0.7f; 
-                    AddRegen(enemy, 6.0f);
+                    enemy.transform.localScale *= 0.85f; 
+                    AddRegen(enemy, 6.0f); 
                     break;
             }
 
@@ -386,7 +355,7 @@ namespace PileErico
             if (hp != null) {
                 hp.BaseValue *= hpMultiplier;
                 enemy.Health.Init(); 
-                enemy.Health.AddHealth(100000f); 
+                enemy.Health.AddHealth(100000f); // 补满血
             }
         }
 
@@ -416,11 +385,9 @@ namespace PileErico
             catch { }
         }
 
-        // --- 监控与生成算法 ---
-
         private async UniTaskVoid MonitorInvader(CharacterMainControl enemy, string fingerTitle, string cleanName)
         {
-            await UniTask.Delay(10000);
+            await UniTask.Delay(10000); 
 
             while (enemy != null && !enemy.Health.IsDead)
             {
@@ -471,7 +438,53 @@ namespace PileErico
             return null;
         }
 
-        // --- UI 动画 ---
+        private void CreateInvasionUI()
+        {
+            GameObject canvasObj = new GameObject("PileErico_InvasionCanvas");
+            UnityEngine.Object.DontDestroyOnLoad(canvasObj);
+            Canvas canvas = canvasObj.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvas.sortingOrder = 2000; 
+            CanvasScaler scaler = canvasObj.AddComponent<CanvasScaler>();
+            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+            scaler.referenceResolution = new Vector2(1920, 1080);
+            _uiRoot = canvasObj;
+
+            GameObject bgObj = new GameObject("BackgroundBar");
+            bgObj.transform.SetParent(canvasObj.transform, false);
+            Image bgImage = bgObj.AddComponent<Image>();
+            bgImage.color = new Color(0f, 0f, 0f, 0.85f); 
+            RectTransform bgRect = bgImage.GetComponent<RectTransform>();
+            bgRect.anchorMin = new Vector2(0, 0.5f); bgRect.anchorMax = new Vector2(1, 0.5f); 
+            bgRect.pivot = new Vector2(0.5f, 0.5f); bgRect.sizeDelta = new Vector2(0, 100);  
+            bgRect.anchoredPosition = new Vector2(0, -250); 
+
+            GameObject textObj = new GameObject("InvasionText");
+            textObj.transform.SetParent(bgObj.transform, false);
+            _uiText = textObj.AddComponent<Text>();
+            
+            Font? font = Resources.GetBuiltinResource<Font>("Arial.ttf");
+            if (font == null) font = Resources.FindObjectsOfTypeAll<Font>().FirstOrDefault(f => f.name == "Arial");
+            if (font == null) font = Font.CreateDynamicFontFromOSFont("Arial", 42);
+
+            _uiText.font = font;
+            _uiText.fontSize = 42; 
+            _uiText.alignment = TextAnchor.MiddleCenter;
+            _uiText.color = Color.white; 
+            _uiText.supportRichText = true;
+            
+            Shadow shadow = textObj.AddComponent<Shadow>();
+            shadow.effectColor = new Color(0, 0, 0, 1f); 
+            shadow.effectDistance = new Vector2(2, -2);
+            
+            RectTransform textRect = _uiText.GetComponent<RectTransform>();
+            textRect.anchorMin = Vector2.zero; textRect.anchorMax = Vector2.one; textRect.sizeDelta = Vector2.zero;
+
+            _uiCanvasGroup = bgObj.AddComponent<CanvasGroup>();
+            _uiCanvasGroup.alpha = 0f; 
+            _uiCanvasGroup.blocksRaycasts = false; 
+        }
+
         private IEnumerator ShowInvasionAnimation(string text)
         {
             if (_uiCanvasGroup == null || _uiText == null) yield break;
@@ -479,12 +492,7 @@ namespace PileErico
             _uiText.text = text;
             _uiCanvasGroup.alpha = 0f;
 
-            float SmoothFade(float start, float end, float t)
-            {
-                return Mathf.Lerp(start, end, Mathf.SmoothStep(0f, 1f, t));
-            }
-
-            // 1. 淡入 (0.5s)
+            float SmoothFade(float start, float end, float t) => Mathf.Lerp(start, end, Mathf.SmoothStep(0f, 1f, t));
             float timer = 0f;
             while (timer < 0.5f)
             {
@@ -494,10 +502,8 @@ namespace PileErico
             }
             _uiCanvasGroup.alpha = 1f;
 
-            // 2. 停留 (1.0s)
-            yield return new WaitForSeconds(1.0f);
+            yield return new WaitForSeconds(3.0f);
 
-            // 3. 呼吸淡出 (0.5s)
             timer = 0f;
             while (timer < 0.5f)
             {
@@ -506,36 +512,6 @@ namespace PileErico
                 yield return null;
             }
             _uiCanvasGroup.alpha = 0f;
-
-            // 4. 呼吸淡入 (0.5s)
-            timer = 0f;
-            while (timer < 0.5f)
-            {
-                timer += Time.deltaTime;
-                _uiCanvasGroup.alpha = SmoothFade(0f, 1f, timer / 0.5f);
-                yield return null;
-            }
-            _uiCanvasGroup.alpha = 1f;
-
-            // 5. 再次停留 (1.0s)
-            yield return new WaitForSeconds(1.0f);
-
-            // 6. 最终淡出 (0.5s)
-            timer = 0f;
-            while (timer < 0.5f)
-            {
-                timer += Time.deltaTime;
-                _uiCanvasGroup.alpha = SmoothFade(1f, 0f, timer / 0.5f);
-                yield return null;
-            }
-            _uiCanvasGroup.alpha = 0f;
-        }
-
-        // --- 辅助方法 ---
-        private string CleanName(string input)
-        {
-            if (string.IsNullOrEmpty(input)) return "未知单位";
-            return input.Replace("*", "").Trim();
         }
 
         private string GetFingerTitle(FingerType t) => t switch {
@@ -544,7 +520,6 @@ namespace PileErico
         };
     }
 
-    // --- 组件类 ---
     public class InvaderCombatTalker : MonoBehaviour
     {
         private CharacterMainControl? _owner;
@@ -583,7 +558,6 @@ namespace PileErico
         private float nextBuffTime = 0f;
         private const float BuffInterval = 2.0f; 
         private const float AuraRadius = 20.0f;
-
         private List<Buff> _debuffPool = new List<Buff>();
 
         void Start()
@@ -593,7 +567,6 @@ namespace PileErico
 
             var type = buffsData.GetType();
             var properties = type.GetProperties(BindingFlags.Public | BindingFlags.Instance);
-
             string[] keywords = { "BleedS", "Electr", "Shock", "Fire", "Burn", "Poison" };
 
             foreach (var p in properties)
@@ -605,10 +578,7 @@ namespace PileErico
                         if (p.Name.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0)
                         {
                             var val = p.GetValue(buffsData) as Buff;
-                            if (val != null && !_debuffPool.Contains(val))
-                            {
-                                _debuffPool.Add(val);
-                            }
+                            if (val != null && !_debuffPool.Contains(val)) _debuffPool.Add(val);
                             break;
                         }
                     }
@@ -619,7 +589,6 @@ namespace PileErico
         void Update()
         {
             if (CharacterMainControl.Main == null || CharacterMainControl.Main.Health.IsDead) return;
-
             float dist = Vector3.Distance(transform.position, CharacterMainControl.Main.transform.position);
             
             if (dist <= AuraRadius)
@@ -635,12 +604,8 @@ namespace PileErico
         private void ApplyRandomDebuff(CharacterMainControl player)
         {
             if (_debuffPool.Count == 0) return;
-
             Buff selected = _debuffPool[UnityEngine.Random.Range(0, _debuffPool.Count)];
-            if (selected != null)
-            {
-                player.AddBuff(selected, null, 0);
-            }
+            if (selected != null) player.AddBuff(selected, null, 0);
         }
     }
 

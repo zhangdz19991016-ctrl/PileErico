@@ -29,14 +29,11 @@ namespace PileErico
         public void Initialize()
         {
             ModBehaviour.LogToFile("[LootManager] 正在初始化...");
-            
-            // 1. 加载配置
             this.LoadLootConfig(this.configDir);
             
-            // 2. 订阅全局扫描事件
-            ScanManager.OnCharacterSpawned += OnEnemyFound;
+            // [修复] 使用 OnCharacterReady
+            ScanManager.OnCharacterReady += OnEnemyFound;
             
-            // 3. 处理已经在场上的敌人
             foreach (var character in ScanManager.ActiveCharacters)
             {
                 OnEnemyFound(character);
@@ -45,48 +42,38 @@ namespace PileErico
 
         public void Deactivate()
         {
-            ScanManager.OnCharacterSpawned -= OnEnemyFound;
+            // [修复] 取消订阅 OnCharacterReady
+            ScanManager.OnCharacterReady -= OnEnemyFound;
             ModBehaviour.LogToFile("[LootManager] 已停止监听。");
         }
 
-        // === 核心逻辑：发现敌人 -> 匹配规则 -> 挂载组件 ===
         private void OnEnemyFound(CharacterMainControl character)
         {
             if (!this.configLoaded || this.lootConfig == null || character == null) return;
-            if (character == CharacterMainControl.Main) return; // 排除玩家
+            if (ScanManager.IsPlayer(character)) return;
 
-            // 1. 防止重复挂载
             if (character.GetComponent<LootDropper>() != null) return;
 
-            // 2. 匹配规则 (支持 ID 精确匹配)
             EnemyLootRule? matchingRule = FindMatchingRule(character);
             
-            // 3. 挂载组件
             if (matchingRule != null && matchingRule.LootItems != null && matchingRule.LootItems.Count > 0)
             {
                 var dropper = character.gameObject.AddComponent<LootDropper>();
-                // 传入 this 引用，以便组件回调 TriggerLootDrop
                 dropper.Setup(this, character, matchingRule);
-                
-                // ModBehaviour.LogToFile($"[LootManager] 监控目标: {ScanManager.GetCharacterID(character)}");
             }
         }
 
-        // === 执行逻辑：组件监听到死亡后调用此方法 ===
         public void TriggerLootDrop(CharacterMainControl deadCharacter, EnemyLootRule rule)
         {
-            // 启动协程
             modBehaviour.StartCoroutine(AddLootToSpawnedLootBoxCoroutine(deadCharacter, rule));
         }
 
-        // === 智能匹配算法 (调用 ScanManager 数据库) ===
         private EnemyLootRule? FindMatchingRule(CharacterMainControl character)
         {
             if (character == null || this.lootConfig == null) return null;
             
-            // 获取目标的真实 ID (PresetName) 和 显示名
             string targetID = ScanManager.GetCharacterID(character);
-            string targetName = character.name;
+            string targetName = ScanManager.GetCleanDisplayName(character);
 
             foreach (EnemyLootRule rule in this.lootConfig.EnemyLootRules)
             {
@@ -96,17 +83,12 @@ namespace PileErico
                     {
                         if (string.IsNullOrEmpty(keyword)) continue;
 
-                        // 1. 查 ScanManager 的映射表 (精准匹配)
                         if (ScanManager.NameIdMapping.TryGetValue(keyword, out string[] mappedIds))
                         {
-                            // 只要目标 ID 包含映射表里的任意一个 ID (忽略大小写)
                             if (mappedIds.Any(id => targetID.IndexOf(id, StringComparison.OrdinalIgnoreCase) >= 0))
-                            {
                                 return rule;
-                            }
                         }
 
-                        // 2. 后备：直接模糊匹配 (兼容旧配置或英文 ID)
                         if (targetID.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0 || 
                             targetName.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0)
                         {
@@ -115,29 +97,21 @@ namespace PileErico
                     }
                 }
             }
-            // 返回默认规则
             return this.lootConfig.EnemyLootRules.FirstOrDefault(r => r.EnemyNameKeywords == null || r.EnemyNameKeywords.Count == 0);
         }
 
-        // === 协程：等待箱子生成并注入物品 ===
         private IEnumerator AddLootToSpawnedLootBoxCoroutine(CharacterMainControl deadCharacter, EnemyLootRule matchingRule)
         {
             InteractableLootbox? foundLootbox = null;
-            float timeout = 3.0f; // 等待 3 秒
+            float timeout = 3.0f; 
 
             while (timeout > 0f)
             {
                 if (deadCharacter == null) yield break; 
-
-                // 搜索死亡位置附近的战利品箱 (3米内)
                 foundLootbox = UnityEngine.Object.FindObjectsOfType<InteractableLootbox>()
-                    .FirstOrDefault(lootbox => 
-                        lootbox.Inventory != null && 
-                        Vector3.Distance(lootbox.transform.position, deadCharacter.transform.position) < 3.0f
-                    );
+                    .FirstOrDefault(lootbox => lootbox.Inventory != null && Vector3.Distance(lootbox.transform.position, deadCharacter.transform.position) < 3.0f);
 
                 if (foundLootbox != null) break;
-                
                 yield return null; 
                 timeout -= Time.deltaTime;
             }
@@ -170,7 +144,6 @@ namespace PileErico
             }
         }
 
-        // === 配置加载 ===
         private void LoadLootConfig(string modDir)
         {
             try
@@ -196,9 +169,6 @@ namespace PileErico
             }
         }
 
-        // =============================================================
-        //  组件类：LootDropper (集成在同一文件)
-        // =============================================================
         public class LootDropper : MonoBehaviour
         {
             private LootManager? _manager;
@@ -211,29 +181,22 @@ namespace PileErico
                 _manager = manager;
                 _target = target;
                 _rule = rule;
-
                 if (_target != null && _target.Health != null)
-                {
                     _target.Health.OnDeadEvent.AddListener(OnDeath);
-                }
             }
 
             private void OnDeath(DamageInfo info)
             {
                 if (_isQuitting) return;
                 if (_manager != null && _target != null && _rule != null)
-                {
                     _manager.TriggerLootDrop(_target, _rule);
-                }
                 Cleanup();
             }
 
             private void Cleanup()
             {
                 if (_target != null && _target.Health != null)
-                {
                     _target.Health.OnDeadEvent.RemoveListener(OnDeath);
-                }
                 Destroy(this);
             }
 
@@ -242,26 +205,7 @@ namespace PileErico
         }
     }
 
-    // === 数据结构 ===
-    [Serializable]
-    public class LootConfig
-    {
-        public int ExtraSlots = 12;
-        public List<EnemyLootRule> EnemyLootRules = new List<EnemyLootRule>();
-    }
-
-    [Serializable]
-    public class EnemyLootRule
-    {
-        public List<string> EnemyNameKeywords = new List<string>();
-        public List<LootItem> LootItems = new List<LootItem>();
-    }
-
-    [Serializable]
-    public class LootItem
-    {
-        public int ItemID;
-        public int Count = 1;
-        public float Chance = 100f;
-    }
+    [Serializable] public class LootConfig { public int ExtraSlots = 12; public List<EnemyLootRule> EnemyLootRules = new List<EnemyLootRule>(); }
+    [Serializable] public class EnemyLootRule { public List<string> EnemyNameKeywords = new List<string>(); public List<LootItem> LootItems = new List<LootItem>(); }
+    [Serializable] public class LootItem { public int ItemID; public int Count = 1; public float Chance = 100f; }
 }

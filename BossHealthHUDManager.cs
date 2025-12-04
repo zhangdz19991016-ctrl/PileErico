@@ -1,7 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.IO; // [修复] 添加了 IO 引用，解决 Path 报错
+using System.IO;
 using System.Linq;
 using Duckov;
 using ItemStatsSystem;
@@ -10,42 +10,29 @@ using UnityEngine.UI;
 
 namespace PileErico
 {
+    /// <summary>
+    /// Boss 血条显示管理器 (UI Tweaked: Pos 160, HP Text Above)
+    /// </summary>
     public class BossHealthHUDManager : MonoBehaviour
     {
-        // ───── 核心逻辑 ─────
         private CharacterMainControl? _player;
-        
-        // 1. 已发现的Boss列表 (由 ScanManager 事件填充)
-        private readonly List<CharacterMainControl> _discoveredBosses = new List<CharacterMainControl>();
-        // 2. 当前追踪显示的Boss列表 (根据距离筛选)
         private readonly List<CharacterMainControl> _trackedBosses = new List<CharacterMainControl>();
-        // 3. 已知 Boss ID 集合 (从 ScanManager 初始化)
-        private HashSet<string> _knownBossIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        // 我们关注的 Boss 关键词 (用于从 ScanManager 提取 ID)
-        private readonly string[] _bossKeywords = 
-        {
-            "迷塞尔", "三枪哥", "矮鸭", "光之男", "急速团长", "劳登", "风暴生物", 
-            "暴走街机", "蝇蝇队长", "矿长", "高级工程师", "喷子", "炸弹狂人", 
-            "维达", "路障", "???", "口口口口", "比利比利", "噗咙噗咙", "啪啦啪啦", "咕噜咕噜"
-        };
-
         private bool _uiEnabled = true;
-        private float _maxBossDisplayDistance = 20f;
-        private readonly Dictionary<CharacterMainControl, float> _lastHpMap = new Dictionary<CharacterMainControl, float>();
-        private readonly List<CharacterMainControl?> _cleanupList = new List<CharacterMainControl?>();
+        private const float DisplayDistance = 30f; 
 
-        private int _previousTrackedBossCount = -1;
-        private int _previousDrawnBossCount = -1;
-
-        // DUCK HUNTED 动画变量
-        private string? _lastKilledBossName;
+        // 动画变量
         private Coroutine? _duckHuntedCoroutine;
+        private const float GhostConvergeTime = 1.0f; 
+        private const float GhostHoldTime = 0.5f;     
+        private const float FadeOutTime = 1.0f;     
+        private const float GhostMaxOffset = 20f; 
 
         // UI 引用
         private Canvas _canvas = null!;
+        private GameObject _healthBarContainer = null!;
         private List<HealthBarUI> _healthBarUIs = new List<HealthBarUI>();
         private const int MaxBossBars = 3;
+        
         private GameObject _duckHuntedOverlay = null!;
         private CanvasGroup _duckHuntedCanvasGroup = null!;
         private Text _duckHuntedMainText = null!;
@@ -55,10 +42,6 @@ namespace PileErico
         private RectTransform _duckHuntedMainRect = null!;
         private RectTransform _duckHuntedGhost1Rect = null!;
         private RectTransform _duckHuntedGhost2Rect = null!;
-        private const float GhostConvergeTime = 1.0f; 
-        private const float GhostHoldTime = 0.5f;     
-        private const float FadeOutTime = 1.0f;     
-        private const float GhostMaxOffset = 20f;     
         private static Sprite? _minimalSprite;
 
         private class HealthBarUI
@@ -67,8 +50,9 @@ namespace PileErico
             public Image Fill = null!;
             public Image Fill_Ghost = null!;
             public Text NameText = null!;
-            public Text HpText = null!;
+            public Text HpText = null!; // 血量文本
             public Image BarBG = null!;
+            public Image Border = null!;
             public float CurrentGhostFill = 1.0f;
             public float LastKnownFill = 1.0f;
             public float GhostTimer = 0f;
@@ -76,103 +60,34 @@ namespace PileErico
             public const float GhostLerpSpeed = 2.0f;
         }
 
-        // ───── 模组入口与生命周期 ─────
+        [Serializable]
+        public class ModuleConfig { public bool EnableBossHealthBar = true; }
+        private static ModuleConfig _currentConfig = new ModuleConfig();
 
         private void Awake()
         {
-            if (!ModBehaviour.Config.EnableBossHealthBar)
-            {
-                Destroy(this);
-                return;
-            }
-
-            // 1. 初始化 Boss ID 集合
-            InitializeBossIdList();
-
-            // 2. 订阅 ScanManager
-            ScanManager.OnCharacterSpawned += OnEnemyFound;
-            ScanManager.OnCharacterDespawned += OnEnemyLost;
-
-            // 3. 捕获场上已存在的单位
-            foreach (var ch in ScanManager.ActiveCharacters)
-            {
-                OnEnemyFound(ch);
-            }
-
+            LoadModuleConfig();
+            if (!_currentConfig.EnableBossHealthBar) { Destroy(this); return; }
             TryFindPlayer();
             CreateUGUI();
         }
 
-        private void OnDestroy()
-        {
-            ScanManager.OnCharacterSpawned -= OnEnemyFound;
-            ScanManager.OnCharacterDespawned -= OnEnemyLost;
-            
-            if (_canvas != null) Destroy(_canvas.gameObject);
-            _discoveredBosses.Clear();
-            _trackedBosses.Clear();
-            _lastHpMap.Clear();
-        }
+        private void OnEnable() => ScanManager.OnCharacterLost += OnScanCharacterLost;
+        private void OnDisable() { ScanManager.OnCharacterLost -= OnScanCharacterLost; _trackedBosses.Clear(); }
+        private void OnDestroy() { if (_canvas != null && _canvas.gameObject != null) Destroy(_canvas.gameObject); }
 
-        // === 初始化：从 ScanManager 加载 ID ===
-        private void InitializeBossIdList()
+        private void OnScanCharacterLost(CharacterMainControl ch)
         {
-            _knownBossIds.Clear();
-            foreach (var key in _bossKeywords)
+            if (ScanManager.IsBoss(ch) && ch.Health != null && ch.Health.IsDead)
             {
-                if (ScanManager.NameIdMapping.TryGetValue(key, out string[] ids))
-                {
-                    foreach (var id in ids) _knownBossIds.Add(id);
-                }
+                string bossName = ScanManager.GetCleanDisplayName(ch);
+                TriggerDuckHunted(bossName);
             }
-            ModBehaviour.LogToFile($"[BossHUD] 已加载 Boss ID 列表，共 {_knownBossIds.Count} 个特征码。");
-        }
-
-        // === 事件回调：新单位 ===
-        private void OnEnemyFound(CharacterMainControl ch)
-        {
-            if (IsKnownBoss(ch)) // [修复] 调用改名后的方法
-            {
-                if (!_discoveredBosses.Contains(ch))
-                {
-                    _discoveredBosses.Add(ch);
-                    if (ch.Health != null && !_lastHpMap.ContainsKey(ch))
-                    {
-                        _lastHpMap[ch] = ch.Health.CurrentHealth;
-                    }
-                    ModBehaviour.LogToFile($"[BossHUD] 发现Boss: {ch.name} (ID: {ScanManager.GetCharacterID(ch)})");
-                }
-            }
-        }
-
-        // === 事件回调：单位消失 ===
-        private void OnEnemyLost(CharacterMainControl ch)
-        {
-            if (_discoveredBosses.Contains(ch))
-            {
-                _discoveredBosses.Remove(ch);
-                _trackedBosses.Remove(ch);
-                _lastHpMap.Remove(ch);
-            }
-        }
-
-        // === 核心判断：是否是 Boss ===
-        // [修复] 方法名改回 IsKnownBoss 以兼容 InvasionManager
-        public bool IsKnownBoss(CharacterMainControl ch)
-        {
-            if (ch == null) return false;
-            string id = ScanManager.GetCharacterID(ch);
-            
-            // 使用 ID 精确匹配
-            if (_knownBossIds.Any(knownId => id.IndexOf(knownId, StringComparison.OrdinalIgnoreCase) >= 0))
-            {
-                return true;
-            }
-            return false;
         }
 
         private void Update()
         {
+            if (!_currentConfig.EnableBossHealthBar) return;
             if (UnityEngine.Input.GetKeyDown(KeyCode.F8))
             {
                 _uiEnabled = !_uiEnabled;
@@ -181,105 +96,60 @@ namespace PileErico
             if (!_uiEnabled) return;
             if (_player == null) TryFindPlayer();
 
-            UpdateBossDeathState();
-
-            // 每 10 帧更新一次距离筛选
-            if (Time.frameCount % 10 == 0)
-            {
-                UpdateTrackedBosses();
-            }
-
+            if (Time.frameCount % 10 == 0) UpdateTrackedBosses();
             UpdateUGUI();
         }
 
         private void UpdateTrackedBosses()
         {
             if (_player == null) return;
-
-            List<CharacterMainControl> candidates = new List<CharacterMainControl>();
-
-            foreach (CharacterMainControl boss in _discoveredBosses)
-            {
-                if (boss == null || !boss) continue;
-                Health h = boss.Health;
-                if (h == null || h.CurrentHealth <= 0f) continue;
-
-                float dist = Vector3.Distance(_player.transform.position, boss.transform.position);
-                if (dist > _maxBossDisplayDistance) continue;
-
-                candidates.Add(boss);
-            }
-
-            candidates.Sort((a, b) =>
-            {
-                Health? ha = a != null ? a.Health : null;
-                Health? hb = b != null ? b.Health : null;
-                float ma = (ha != null) ? ha.MaxHealth : 0f;
-                float mb = (hb != null) ? hb.MaxHealth : 0f;
-                return mb.CompareTo(ma);
-            });
-
             _trackedBosses.Clear();
-            for (int i = 0; i < candidates.Count && i < MaxBossBars; i++)
-            {
-                _trackedBosses.Add(candidates[i]);
-            }
-
-            if (_trackedBosses.Count != _previousTrackedBossCount)
-            {
-                _previousTrackedBossCount = _trackedBosses.Count;
-            }
+            var nearbyBosses = ScanManager.GetNearbyBosses(_player.transform.position, DisplayDistance);
+            var sortedCandidates = nearbyBosses.OrderByDescending(b => b.Health.MaxHealth).ToList();
+            for (int i = 0; i < sortedCandidates.Count && i < MaxBossBars; i++) _trackedBosses.Add(sortedCandidates[i]);
         }
 
-        private void UpdateBossDeathState()
+        private void UpdateUGUI()
         {
-            if (_discoveredBosses.Count == 0) return;
+            if (_player == null) return;
 
-            _cleanupList.Clear();
-
-            foreach (CharacterMainControl boss in _discoveredBosses)
+            for (int i = 0; i < _healthBarUIs.Count; i++)
             {
-                if (boss == null || !boss)
+                HealthBarUI ui = _healthBarUIs[i];
+                if (i < _trackedBosses.Count)
                 {
-                    _cleanupList.Add(boss);
-                    continue;
+                    CharacterMainControl boss = _trackedBosses[i];
+                    if (boss == null || !boss || boss.Health == null) { ui.Root.SetActive(false); continue; }
+                    if (!ui.Root.activeSelf) ui.Root.SetActive(true);
+
+                    float maxHp = boss.Health.MaxHealth;
+                    float curHp = boss.Health.CurrentHealth;
+                    float targetRatio = Mathf.Clamp01(curHp / maxHp);
+
+                    string displayName = ScanManager.GetCleanDisplayName(boss);
+                    if (ui.NameText.text != displayName) ui.NameText.text = displayName;
+
+                    ui.HpText.text = $"{curHp:0}/{maxHp:0} ({(targetRatio * 100f):0}%)";
+                    ui.Fill.fillAmount = targetRatio;
+
+                    if (Mathf.Abs(ui.CurrentGhostFill - targetRatio) > 0.5f && !ui.Root.activeInHierarchy) { ui.CurrentGhostFill = targetRatio; ui.LastKnownFill = targetRatio; ui.GhostTimer = 0f; }
+                    if (targetRatio < ui.LastKnownFill) { ui.GhostTimer = HealthBarUI.GhostDelay; ui.LastKnownFill = targetRatio; }
+                    else if (targetRatio > ui.CurrentGhostFill) { ui.CurrentGhostFill = targetRatio; ui.LastKnownFill = targetRatio; ui.GhostTimer = 0f; }
+
+                    if (ui.GhostTimer > 0f) ui.GhostTimer -= Time.deltaTime;
+                    else if (ui.CurrentGhostFill > targetRatio) ui.CurrentGhostFill = Mathf.MoveTowards(ui.CurrentGhostFill, targetRatio, HealthBarUI.GhostLerpSpeed * Time.deltaTime);
+                    ui.Fill_Ghost.fillAmount = ui.CurrentGhostFill;
                 }
-
-                Health h = boss.Health;
-                if (h == null)
+                else
                 {
-                    _cleanupList.Add(boss);
-                    continue;
-                }
-
-                float curHp = h.CurrentHealth;
-                if (!_lastHpMap.TryGetValue(boss, out float prevHp))
-                {
-                    _lastHpMap[boss] = curHp;
-                    continue;
-                }
-
-                if (prevHp > 0f && curHp <= 0f)
-                {
-                    string bossName = GetDisplayName(boss);
-                    TriggerDuckHunted(bossName);
-                }
-
-                _lastHpMap[boss] = curHp;
-            }
-
-            foreach (CharacterMainControl? dead in _cleanupList)
-            {
-                if (dead != null)
-                {
-                    _lastHpMap.Remove(dead);
-                    _discoveredBosses.Remove(dead);
-                    _trackedBosses.Remove(dead);
+                    if (ui.Root.activeSelf) ui.Root.SetActive(false);
                 }
             }
         }
 
-        // ───── UI 构建 (保留) ─────
+        private void LoadModuleConfig() { try { string p=Path.Combine(Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location)??"", "ModuleEnabled.json"); if(!File.Exists(p)) File.WriteAllText(p, JsonUtility.ToJson(_currentConfig, true)); else _currentConfig=JsonUtility.FromJson<ModuleConfig>(File.ReadAllText(p)); } catch{ _currentConfig=new ModuleConfig(); } }
+        private void TryFindPlayer() { try { _player = CharacterMainControl.Main; } catch {} }
+
         private void CreateUGUI()
         {
             GameObject canvasObj = new GameObject("BossHealthHUDCanvas");
@@ -290,226 +160,116 @@ namespace PileErico
             var scaler = canvasObj.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
             scaler.referenceResolution = new Vector2(1920, 1080);
+            scaler.matchWidthOrHeight = 0.5f;
             canvasObj.AddComponent<GraphicRaycaster>();
 
-            GameObject healthBarContainer = CreateUIObject("HealthBarContainer", canvasObj.transform);
-            RectTransform containerRect = healthBarContainer.GetComponent<RectTransform>();
+            _healthBarContainer = CreateUIObject("HealthBarContainer", canvasObj.transform);
+            RectTransform containerRect = _healthBarContainer.GetComponent<RectTransform>();
+            
+            // [修复] 位置调整为 160f (比180低一点，比100高)
             containerRect.anchorMin = new Vector2(0.5f, 0f); containerRect.anchorMax = new Vector2(0.5f, 0f);
-            containerRect.pivot = new Vector2(0.5f, 0f); containerRect.anchoredPosition = new Vector2(0, 180f);
+            containerRect.pivot = new Vector2(0.5f, 0f); containerRect.anchoredPosition = new Vector2(0, 160f); 
             containerRect.sizeDelta = new Vector2(1024f, 400f);
-            VerticalLayoutGroup layoutGroup = healthBarContainer.AddComponent<VerticalLayoutGroup>();
-            layoutGroup.childAlignment = TextAnchor.LowerCenter; layoutGroup.spacing = 15f; 
-            layoutGroup.childControlWidth = true; layoutGroup.childControlHeight = false;
+            
+            VerticalLayoutGroup layout = _healthBarContainer.AddComponent<VerticalLayoutGroup>();
+            layout.childAlignment = TextAnchor.LowerCenter; layout.spacing = 25f; 
+            layout.childControlWidth = true; layout.childControlHeight = false;
+            layout.childForceExpandWidth = true; layout.childForceExpandHeight = false;
 
-            float barWidth = 1024f; float barHeight = 12f; float nameHeight = 24f; 
+            float innerBarHeight = 12f;
+            float borderThickness = 2f; 
+            float totalBarHeight = innerBarHeight + (borderThickness * 2); 
+            float nameHeight = 22f; 
+            float textGap = 3f;
+            float totalItemHeight = totalBarHeight + nameHeight + textGap;
+
+            Color borderColor = new Color(0.412f, 0.4f, 0.333f, 1f);
 
             for (int i = 0; i < MaxBossBars; i++)
             {
                 HealthBarUI ui = new HealthBarUI();
-                ui.Root = CreateUIObject($"HealthBar_{i}", healthBarContainer.transform);
-                ui.Root.GetComponent<RectTransform>().sizeDelta = new Vector2(barWidth, barHeight + nameHeight + 5f);
-                ui.Root.AddComponent<LayoutElement>().preferredHeight = barHeight + nameHeight + 5f;
+                ui.Root = CreateUIObject($"HealthBar_{i}", _healthBarContainer.transform);
+                LayoutElement le = ui.Root.AddComponent<LayoutElement>();
+                le.minHeight = totalItemHeight; 
+                le.preferredHeight = totalItemHeight; 
+                le.preferredWidth = 1024f;
 
-                ui.NameText = CreateUIText($"NameText_{i}", ui.Root.transform, 22, Color.white, TextAnchor.MiddleLeft);
+                // 1. 边框 (Bottom)
+                GameObject borderObj = CreateUIObject("Border", ui.Root.transform);
+                RectTransform borderRect = borderObj.GetComponent<RectTransform>();
+                borderRect.anchorMin = new Vector2(0, 0); borderRect.anchorMax = new Vector2(1, 0);
+                borderRect.pivot = new Vector2(0.5f, 0); 
+                borderRect.anchoredPosition = Vector2.zero; 
+                borderRect.sizeDelta = new Vector2(0, totalBarHeight);
+
+                ui.Border = borderObj.AddComponent<Image>();
+                ui.Border.color = borderColor;
+
+                // 2. 内部血条 (Inside Border)
+                GameObject barContainer = CreateUIObject("BarContainer", borderObj.transform);
+                RectTransform barRect = barContainer.GetComponent<RectTransform>();
+                StretchFillRect(barRect, borderThickness); 
+
+                // 3. 名字文本 (Top-Left)
+                ui.NameText = CreateUIText($"NameText_{i}", ui.Root.transform, 20, Color.white, TextAnchor.MiddleLeft);
                 RectTransform nameRect = ui.NameText.GetComponent<RectTransform>();
-                nameRect.anchorMin = new Vector2(0, 1); nameRect.anchorMax = new Vector2(1, 1);
-                nameRect.pivot = new Vector2(0, 1); nameRect.sizeDelta = new Vector2(barWidth, nameHeight);
-                nameRect.anchoredPosition = Vector2.zero;
+                nameRect.anchorMin = new Vector2(0, 0); nameRect.anchorMax = new Vector2(1, 0); 
+                nameRect.pivot = new Vector2(0.5f, 0);
+                // 位于血条上方
+                nameRect.anchoredPosition = new Vector2(2f, totalBarHeight + textGap); 
+                nameRect.sizeDelta = new Vector2(0, nameHeight);
 
-                GameObject barContainer = CreateUIObject("BarContainer", ui.Root.transform);
-                RectTransform barContainerRect = barContainer.GetComponent<RectTransform>();
-                barContainerRect.anchorMin = new Vector2(0, 0); barContainerRect.anchorMax = new Vector2(1, 0);
-                barContainerRect.pivot = new Vector2(0.5f, 0); barContainerRect.sizeDelta = new Vector2(0, barHeight);
-                barContainerRect.anchoredPosition = new Vector2(0, 0);
+                // 4. [新功能] 血量文本 (Top-Center)
+                // 移到了 Root 下，和 NameText 同级，不再位于 barContainer 内部
+                ui.HpText = CreateUIText($"HPText_{i}", ui.Root.transform, 18, new Color(1f,1f,1f,0.9f), TextAnchor.MiddleCenter);
+                RectTransform hpRect = ui.HpText.GetComponent<RectTransform>();
+                hpRect.anchorMin = new Vector2(0, 0); hpRect.anchorMax = new Vector2(1, 0);
+                hpRect.pivot = new Vector2(0.5f, 0);
+                // 和名字同一高度
+                hpRect.anchoredPosition = new Vector2(0, totalBarHeight + textGap);
+                hpRect.sizeDelta = new Vector2(0, nameHeight);
 
-                ui.BarBG = CreateUIImage($"BarBG_{i}", barContainer.transform, new Color(0.05f, 0.05f, 0.05f, 0.8f));
+                // 血条填充
+                ui.BarBG = CreateUIImage("BG", barContainer.transform, new Color(0.05f, 0.05f, 0.05f, 0.85f));
                 StretchFillRect(ui.BarBG.GetComponent<RectTransform>());
-
-                ui.Fill_Ghost = CreateUIImage("BarFill_Ghost", barContainer.transform, new Color(0.9f, 0.8f, 0.2f, 0.8f));
+                
+                ui.Fill_Ghost = CreateUIImage("Ghost", barContainer.transform, new Color(0.9f, 0.8f, 0.2f, 0.9f));
                 ui.Fill_Ghost.type = Image.Type.Filled; ui.Fill_Ghost.fillMethod = Image.FillMethod.Horizontal;
-                StretchFillRect(ui.Fill_Ghost.GetComponent<RectTransform>(), 0); 
+                StretchFillRect(ui.Fill_Ghost.GetComponent<RectTransform>());
 
-                ui.Fill = CreateUIImage("BarFill", barContainer.transform, new Color(0.5f, 0.02f, 0.02f, 1.0f));
+                ui.Fill = CreateUIImage("Fill", barContainer.transform, new Color(0.6f, 0.05f, 0.05f, 1.0f));
                 ui.Fill.type = Image.Type.Filled; ui.Fill.fillMethod = Image.FillMethod.Horizontal;
-                StretchFillRect(ui.Fill.GetComponent<RectTransform>(), 0); 
-
-                ui.HpText = CreateUIText($"HPText_{i}", barContainer.transform, 12, new Color(1f,1f,1f,0.7f), TextAnchor.MiddleCenter);
-                StretchFillRect(ui.HpText.GetComponent<RectTransform>());
+                StretchFillRect(ui.Fill.GetComponent<RectTransform>());
 
                 ui.Root.SetActive(false);
                 _healthBarUIs.Add(ui);
             }
+            CreateDuckHuntedOverlay(canvasObj.transform);
+        }
 
-            _duckHuntedOverlay = CreateUIObject("DuckHuntedOverlay", canvasObj.transform);
+        private void CreateDuckHuntedOverlay(Transform parent) {
+            _duckHuntedOverlay = CreateUIObject("DuckHuntedOverlay", parent);
             _duckHuntedCanvasGroup = _duckHuntedOverlay.AddComponent<CanvasGroup>();
-            RectTransform overlayRect = _duckHuntedOverlay.GetComponent<RectTransform>();
-            overlayRect.anchorMin = new Vector2(0, 0.5f); overlayRect.anchorMax = new Vector2(1, 0.5f);
-            overlayRect.pivot = new Vector2(0.5f, 0.5f); overlayRect.sizeDelta = new Vector2(0f, 110f);
-            overlayRect.anchoredPosition = new Vector2(0, 0); 
-            Image duckHuntedBG = CreateUIImage("DuckHuntedBG", _duckHuntedOverlay.transform, new Color(0f, 0f, 0f, 0.65f));
-            StretchFillRect(duckHuntedBG.GetComponent<RectTransform>());
-            Color paleGold = new Color(1f, 0.85f, 0.6f);
-            _duckHuntedMainText = CreateUIText("MainText", _duckHuntedOverlay.transform, 56, paleGold, TextAnchor.MiddleCenter);
-            _duckHuntedMainText.fontStyle = FontStyle.Bold;
-            _duckHuntedMainRect = _duckHuntedMainText.GetComponent<RectTransform>();
-            StretchFillRect(_duckHuntedMainRect);
-            _duckHuntedMainRect.sizeDelta = new Vector2(0, 80f); _duckHuntedMainRect.anchoredPosition = new Vector2(0, 15f);
-            _duckHuntedGhostText1 = CreateUIText("MainText_Ghost1", _duckHuntedOverlay.transform, 56, paleGold, TextAnchor.MiddleCenter);
-            _duckHuntedGhostText1.fontStyle = FontStyle.Bold;
-            _duckHuntedGhost1Rect = _duckHuntedGhostText1.GetComponent<RectTransform>();
-            StretchFillRect(_duckHuntedGhost1Rect);
-            _duckHuntedGhost1Rect.sizeDelta = _duckHuntedMainRect.sizeDelta; _duckHuntedGhost1Rect.anchoredPosition = _duckHuntedMainRect.anchoredPosition;
-            _duckHuntedGhostText2 = CreateUIText("MainText_Ghost2", _duckHuntedOverlay.transform, 56, paleGold, TextAnchor.MiddleCenter);
-            _duckHuntedGhostText2.fontStyle = FontStyle.Bold;
-            _duckHuntedGhost2Rect = _duckHuntedGhostText2.GetComponent<RectTransform>();
-            StretchFillRect(_duckHuntedGhost2Rect);
-            _duckHuntedGhost2Rect.sizeDelta = _duckHuntedMainRect.sizeDelta; _duckHuntedGhost2Rect.anchoredPosition = _duckHuntedMainRect.anchoredPosition;
-            _duckHuntedSubText = CreateUIText("SubText", _duckHuntedOverlay.transform, 26, Color.white, TextAnchor.MiddleCenter);
-            RectTransform subTextRect = _duckHuntedSubText.GetComponent<RectTransform>();
-            StretchFillRect(subTextRect);
-            subTextRect.sizeDelta = new Vector2(0, 40f); subTextRect.anchoredPosition = new Vector2(0, -25f); 
+            RectTransform r = _duckHuntedOverlay.GetComponent<RectTransform>();
+            r.anchorMin = new Vector2(0, 0.5f); r.anchorMax = new Vector2(1, 0.5f); r.pivot = new Vector2(0.5f, 0.5f); r.sizeDelta = new Vector2(0, 110f); r.anchoredPosition = Vector2.zero;
+            Image bg = CreateUIImage("BG", _duckHuntedOverlay.transform, new Color(0,0,0,0.65f)); StretchFillRect(bg.GetComponent<RectTransform>());
+            _duckHuntedMainText = CreateUIText("Main", _duckHuntedOverlay.transform, 56, new Color(1f, 0.85f, 0.6f), TextAnchor.MiddleCenter); _duckHuntedMainText.fontStyle = FontStyle.Bold;
+            _duckHuntedMainRect = _duckHuntedMainText.GetComponent<RectTransform>(); StretchFillRect(_duckHuntedMainRect); _duckHuntedMainRect.sizeDelta = new Vector2(0, 80f); _duckHuntedMainRect.anchoredPosition = new Vector2(0, 15f);
+            _duckHuntedGhostText1 = CreateUIText("G1", _duckHuntedOverlay.transform, 56, new Color(1f, 0.85f, 0.6f), TextAnchor.MiddleCenter); _duckHuntedGhostText1.fontStyle = FontStyle.Bold;
+            _duckHuntedGhost1Rect = _duckHuntedGhostText1.GetComponent<RectTransform>(); StretchFillRect(_duckHuntedGhost1Rect); _duckHuntedGhost1Rect.anchoredPosition = _duckHuntedMainRect.anchoredPosition; _duckHuntedGhost1Rect.sizeDelta = _duckHuntedMainRect.sizeDelta;
+            _duckHuntedGhostText2 = CreateUIText("G2", _duckHuntedOverlay.transform, 56, new Color(1f, 0.85f, 0.6f), TextAnchor.MiddleCenter); _duckHuntedGhostText2.fontStyle = FontStyle.Bold;
+            _duckHuntedGhost2Rect = _duckHuntedGhostText2.GetComponent<RectTransform>(); StretchFillRect(_duckHuntedGhost2Rect); _duckHuntedGhost2Rect.anchoredPosition = _duckHuntedMainRect.anchoredPosition; _duckHuntedGhost2Rect.sizeDelta = _duckHuntedMainRect.sizeDelta;
+            _duckHuntedSubText = CreateUIText("Sub", _duckHuntedOverlay.transform, 26, Color.white, TextAnchor.MiddleCenter);
+            RectTransform subRect = _duckHuntedSubText.GetComponent<RectTransform>(); StretchFillRect(subRect); subRect.sizeDelta = new Vector2(0, 40f); subRect.anchoredPosition = new Vector2(0, -25f);
             _duckHuntedOverlay.SetActive(false);
         }
 
-        private void UpdateUGUI()
-        {
-            if (_player == null)
-            {
-                if (_previousDrawnBossCount != 0)
-                {
-                    for (int i = 0; i < _healthBarUIs.Count; i++) _healthBarUIs[i].Root.SetActive(false);
-                    _previousDrawnBossCount = 0;
-                }
-                return;
-            }
-
-            int drawnCount = 0;
-            for (int i = 0; i < _healthBarUIs.Count; i++)
-            {
-                if (i < _trackedBosses.Count && drawnCount < MaxBossBars)
-                {
-                    CharacterMainControl boss = _trackedBosses[i];
-                    HealthBarUI ui = _healthBarUIs[i];
-
-                    if (boss == null || !boss || boss.Health == null || boss.Health.CurrentHealth <= 0f)
-                    {
-                        ui.Root.SetActive(false);
-                        continue;
-                    }
-
-                    bool wasJustActivated = !ui.Root.activeSelf;
-                    float maxHp = boss.Health.MaxHealth;
-                    float curHp = boss.Health.CurrentHealth;
-                    float targetRatio = Mathf.Clamp01(curHp / maxHp);
-
-                    if (wasJustActivated)
-                    {
-                        ui.CurrentGhostFill = targetRatio;
-                        ui.LastKnownFill = targetRatio;
-                        ui.GhostTimer = 0f;
-                    }
-
-                    ui.Fill.fillAmount = targetRatio;
-
-                    if (targetRatio < ui.LastKnownFill) ui.GhostTimer = HealthBarUI.GhostDelay;
-                    else if (targetRatio > ui.CurrentGhostFill) { ui.CurrentGhostFill = targetRatio; ui.GhostTimer = 0f; }
-
-                    if (ui.GhostTimer > 0f) ui.GhostTimer -= Time.deltaTime;
-                    else
-                    {
-                        if (ui.CurrentGhostFill > targetRatio) ui.CurrentGhostFill = Mathf.MoveTowards(ui.CurrentGhostFill, targetRatio, HealthBarUI.GhostLerpSpeed * Time.deltaTime);
-                        else ui.CurrentGhostFill = targetRatio;
-                    }
-
-                    ui.Fill_Ghost.fillAmount = ui.CurrentGhostFill;
-                    ui.LastKnownFill = targetRatio;
-                    ui.NameText.text = GetDisplayName(boss);
-                    ui.HpText.text = string.Format("{0:0}/{1:0}  ({2:P0})", curHp, maxHp, targetRatio);
-                    ui.Root.SetActive(true);
-                    drawnCount++;
-                }
-                else _healthBarUIs[i].Root.SetActive(false);
-            }
-            if (drawnCount != _previousDrawnBossCount) _previousDrawnBossCount = drawnCount;
-        }
-
-        private void TriggerDuckHunted(string bossName)
-        {
-            if (_duckHuntedCoroutine != null) StopCoroutine(_duckHuntedCoroutine);
-            _lastKilledBossName = bossName;
-            _duckHuntedMainText.text = "DUCK HUNTED";
-            _duckHuntedGhostText1.text = "DUCK HUNTED"; _duckHuntedGhostText2.text = "DUCK HUNTED";
-            _duckHuntedSubText.text = bossName;
-            _duckHuntedOverlay.SetActive(true);
-            _duckHuntedCoroutine = StartCoroutine(AnimateDuckHunted());
-            ModBehaviour.LogToFile($"[BossHealthHUDManager] DUCK HUNTED -> {bossName}");
-            TryPlayBossDefeatedSound();
-        }
-
-        private IEnumerator AnimateDuckHunted()
-        {
-            float timer = 0f;
-            Vector2 mainPos = _duckHuntedMainRect.anchoredPosition;
-            Color baseColor = _duckHuntedMainText.color;
-
-            while (timer < GhostConvergeTime)
-            {
-                float t = timer / GhostConvergeTime; 
-                _duckHuntedCanvasGroup.alpha = t;
-                float offset = Mathf.Lerp(GhostMaxOffset, 0f, t);
-                _duckHuntedGhost1Rect.anchoredPosition = mainPos + new Vector2(offset, 0);
-                _duckHuntedGhost2Rect.anchoredPosition = mainPos + new Vector2(-offset, 0);
-                float ghostAlpha = Mathf.Lerp(0.5f, 0f, t);
-                _duckHuntedGhostText1.color = new Color(baseColor.r, baseColor.g, baseColor.b, ghostAlpha);
-                _duckHuntedGhostText2.color = new Color(baseColor.r, baseColor.g, baseColor.b, ghostAlpha);
-                timer += Time.deltaTime; yield return null; 
-            }
-            _duckHuntedCanvasGroup.alpha = 1f;
-            _duckHuntedGhost1Rect.anchoredPosition = mainPos; _duckHuntedGhost2Rect.anchoredPosition = mainPos;
-            _duckHuntedGhostText1.color = new Color(baseColor.r, baseColor.g, baseColor.b, 0f);
-            _duckHuntedGhostText2.color = new Color(baseColor.r, baseColor.g, baseColor.b, 0f);
-            yield return new WaitForSeconds(GhostHoldTime);
-            timer = 0f;
-            while (timer < FadeOutTime) { float t = timer / FadeOutTime; _duckHuntedCanvasGroup.alpha = Mathf.Lerp(1f, 0f, t); timer += Time.deltaTime; yield return null; }
-            _duckHuntedCanvasGroup.alpha = 0f; _duckHuntedOverlay.SetActive(false); _duckHuntedCoroutine = null;
-        }
-
-        private void TryPlayBossDefeatedSound()
-        {
-            try
-            {
-                string dllPath = System.Reflection.Assembly.GetExecutingAssembly().Location;
-                string folder = Path.GetDirectoryName(dllPath) ?? ""; // [修复] Path.GetDirectoryName
-                string filePath = Path.Combine(folder, "Audio", "BossDefeated.mp3"); // [修复] Path.Combine
-                if (System.IO.File.Exists(filePath))
-                    AudioManager.PostCustomSFX(filePath, null, false);
-            }
-            catch (Exception ex) { ModBehaviour.LogErrorToFile("[BossHUD] Sound Error: " + ex); }
-        }
-
-        public int GetTrackedBossCount() => _trackedBosses?.Count ?? 0;
-
-        private void TryFindPlayer() { try { _player = CharacterMainControl.Main; } catch { } }
-
-        private string GetDisplayName(CharacterMainControl ch)
-        {
-            if (ch == null) return string.Empty;
-            try { if (ch.characterPreset != null && !string.IsNullOrEmpty(ch.characterPreset.DisplayName)) return ch.characterPreset.DisplayName; } catch { }
-            return ch.name.Trim('*');
-        }
-
-        // 辅助方法
-        private void StretchFillRect(RectTransform rect, float margin = 0) { rect.anchorMin = Vector2.zero; rect.anchorMax = Vector2.one; rect.pivot = new Vector2(0.5f, 0.5f); rect.offsetMin = new Vector2(margin, margin); rect.offsetMax = new Vector2(-margin, -margin); }
-        private GameObject CreateUIObject(string name, Transform parent) { GameObject obj = new GameObject(name); obj.transform.SetParent(parent, false); obj.AddComponent<RectTransform>(); return obj; }
-        private Image CreateUIImage(string name, Transform parent, Color color) {
-            Image img = CreateUIObject(name, parent).AddComponent<Image>(); img.color = color;
-            if (_minimalSprite == null) { var tex = new Texture2D(1, 1); tex.SetPixel(0, 0, Color.white); tex.Apply(); _minimalSprite = Sprite.Create(tex, new Rect(0, 0, 1, 1), new Vector2(0.5f, 0.5f)); }
-            img.sprite = _minimalSprite; return img;
-        }
-        private Text CreateUIText(string name, Transform parent, int fontSize, Color color, TextAnchor alignment) {
-            Text txt = CreateUIObject(name, parent).AddComponent<Text>(); txt.font = Resources.GetBuiltinResource<Font>("Arial.ttf"); txt.fontSize = fontSize; txt.color = color; txt.alignment = alignment;
-            txt.horizontalOverflow = HorizontalWrapMode.Overflow; txt.verticalOverflow = VerticalWrapMode.Overflow;
-            var shadow = txt.gameObject.AddComponent<Shadow>(); shadow.effectColor = new Color(0, 0, 0, 0.5f); shadow.effectDistance = new Vector2(1, -1); return txt;
-        }
+        private GameObject CreateUIObject(string name, Transform parent) { GameObject o = new GameObject(name); o.transform.SetParent(parent, false); o.AddComponent<RectTransform>(); return o; }
+        private void StretchFillRect(RectTransform r, float m = 0) { r.anchorMin = Vector2.zero; r.anchorMax = Vector2.one; r.pivot = new Vector2(0.5f, 0.5f); r.offsetMin = new Vector2(m, m); r.offsetMax = new Vector2(-m, -m); }
+        private Image CreateUIImage(string name, Transform p, Color c) { Image i = CreateUIObject(name, p).AddComponent<Image>(); i.color = c; if(_minimalSprite==null){ var t=new Texture2D(1,1); t.SetPixel(0,0,Color.white); t.Apply(); _minimalSprite=Sprite.Create(t,new Rect(0,0,1,1),new Vector2(0.5f,0.5f));} i.sprite=_minimalSprite; return i; }
+        private Text CreateUIText(string name, Transform p, int s, Color c, TextAnchor a) { Text t = CreateUIObject(name, p).AddComponent<Text>(); Font? f = Resources.GetBuiltinResource<Font>("Arial.ttf"); if(f==null) f=Resources.FindObjectsOfTypeAll<Font>().FirstOrDefault(x=>x.name=="Arial"); if(f==null) f=Font.CreateDynamicFontFromOSFont("Arial", s); t.font=f; t.fontSize=s; t.color=c; t.alignment=a; t.horizontalOverflow=HorizontalWrapMode.Overflow; t.verticalOverflow=VerticalWrapMode.Overflow; t.gameObject.AddComponent<Shadow>().effectColor=new Color(0,0,0,0.5f); return t; }
+        private void TriggerDuckHunted(string name) { if(_duckHuntedCoroutine!=null) StopCoroutine(_duckHuntedCoroutine); _duckHuntedMainText.text="DUCK HUNTED"; _duckHuntedGhostText1.text="DUCK HUNTED"; _duckHuntedGhostText2.text="DUCK HUNTED"; _duckHuntedSubText.text=name; _duckHuntedOverlay.SetActive(true); _duckHuntedCoroutine=StartCoroutine(AnimDuckHunted()); TryPlaySound(); }
+        private IEnumerator AnimDuckHunted() { float t = 0; Vector2 pos = _duckHuntedMainRect.anchoredPosition; while(t<GhostConvergeTime) { t+=Time.deltaTime; float p = t/GhostConvergeTime; _duckHuntedCanvasGroup.alpha=p; float off=Mathf.Lerp(GhostMaxOffset,0f,p); _duckHuntedGhost1Rect.anchoredPosition=pos+new Vector2(off,0); _duckHuntedGhost2Rect.anchoredPosition=pos+new Vector2(-off,0); float a = Mathf.Lerp(0.5f,0f,p); _duckHuntedGhostText1.color=new Color(1f,0.85f,0.6f,a); _duckHuntedGhostText2.color=new Color(1f,0.85f,0.6f,a); yield return null; } _duckHuntedCanvasGroup.alpha=1; _duckHuntedGhost1Rect.anchoredPosition=pos; _duckHuntedGhost2Rect.anchoredPosition=pos; _duckHuntedGhostText1.color=new Color(1,0.85f,0.6f,0); yield return new WaitForSeconds(GhostHoldTime); t=0; while(t<FadeOutTime) { t+=Time.deltaTime; _duckHuntedCanvasGroup.alpha=Mathf.Lerp(1f,0f,t/FadeOutTime); yield return null; } _duckHuntedOverlay.SetActive(false); }
+        private void TryPlaySound() { try { string p=Path.Combine(Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location)??"", "Audio", "BossDefeated.mp3"); if(File.Exists(p)) AudioManager.PostCustomSFX(p,null,false); } catch{} }
     }
 }
